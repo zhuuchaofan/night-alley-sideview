@@ -3,7 +3,8 @@ import { ARENA_WIDTH, PLAYER_MAX_HP } from '../game/balance.ts';
 import { startBgm } from '../game/bgm.ts';
 import { addPixelText } from '../game/pixelFont.ts';
 import { buildNightAlleyBackdrop, ensureGameTextures, PALETTE } from '../game/pixelart.ts';
-import { registerSideDebugHook } from '../game/sideDebug.ts';
+import { consumePendingSeed, newRandomSeed, setPendingSeed } from '../game/seedStore.ts';
+import { DEFAULT_STAGE_DEBUG_STATE, registerSideDebugHook } from '../game/sideDebug.ts';
 import { unlockSound } from '../game/sound.ts';
 
 export class TitleScene extends Phaser.Scene {
@@ -87,7 +88,9 @@ export class TitleScene extends Phaser.Scene {
       started = true;
       unlockSound();
       startBgm();
-      this.scene.start('SideGameScene');
+      // 待用调试种子 (若有) 消费一次, 否则随机新种子; 回标题后开新局换新种子。
+      const seed = consumePendingSeed() ?? newRandomSeed();
+      this.scene.start('SideGameScene', { seed });
     };
 
     startBtn.on('pointerover', () => {
@@ -130,9 +133,14 @@ export class TitleScene extends Phaser.Scene {
         damageNumbersShown: 0,
         burstsSpawned: 0,
         hitstopsApplied: 0,
+        ...DEFAULT_STAGE_DEBUG_STATE,
       }),
       spawnEnemyNearPlayer: () => {},
       setHp: () => {},
+      // 只写待用种子, 不改当前局; 下次点「开始守夜」时消费一次。
+      setSeed: (seed: number) => {
+        setPendingSeed(seed);
+      },
     });
   }
 }

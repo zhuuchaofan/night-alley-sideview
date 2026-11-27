@@ -20,7 +20,6 @@ import {
   SIDE_HEAVY_HEIGHT,
   SIDE_HEAVY_HITSTOP_MS,
   SIDE_HEAVY_WIDTH,
-  SIDE_INITIAL_ENEMIES,
   SIDE_JUMP_VELOCITY,
   SIDE_ROLL_COOLDOWN,
   SIDE_ROLL_DURATION,
@@ -68,6 +67,16 @@ import {
   SIDE_SQUASH_STRETCH_SECONDS,
 } from '../game/sideFeel.ts';
 import { registerSideDebugHook } from '../game/sideDebug.ts';
+import type { DoorDebugInfo } from '../game/sideDebug.ts';
+import {
+  chainSignature,
+  generateStage,
+  getTemplateById,
+  resolveTemplate,
+  type RoomTemplate,
+  type StageChain,
+} from '../game/rooms.ts';
+import { consumePendingSeed, newRandomSeed, setPendingSeed } from '../game/seedStore.ts';
 import { playSound } from '../game/sound.ts';
 
 interface EnemyUnit {
@@ -87,6 +96,8 @@ interface EnemyUnit {
    */
   appliedKnockX: number;
   appliedKnockY: number;
+  /** 敌人自己的碰撞体 (地面 + 平台); 敌人销毁时显式 destroy, 不留残留。 */
+  colliders: Phaser.Physics.Arcade.Collider[];
 }
 
 interface CoinDrop {
@@ -109,12 +120,29 @@ interface DamageNumberEntry {
   totalLife: number;
 }
 
+interface Door {
+  choice: number;
+  label: string;
+  zone: Phaser.GameObjects.Zone;
+  bg: Phaser.GameObjects.Rectangle;
+  labelText: Phaser.GameObjects.BitmapText;
+  bounds: Phaser.Geom.Rectangle;
+  overlap: Phaser.Physics.Arcade.Collider;
+  /** 门生成时玩家已在门区内则为 false, 须先离开、再重新进入才启用。 */
+  overlapArmed: boolean;
+}
+
 export class SideGameScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
+  /** 常驻地面组 (不随换房重建)。 */
+  private groundGroup!: Phaser.Physics.Arcade.StaticGroup;
+  /** 可变平台组: 每间房按模板重建 (clear 时销毁成员, 含静态体)。 */
   private platforms!: Phaser.Physics.Arcade.StaticGroup;
   private enemies: EnemyUnit[] = [];
   private coinDrops: CoinDrop[] = [];
   private damageNumbers: DamageNumberEntry[] = [];
+  /** 玩家受击飘字 (spawnFloatingNumber 另起的 label + tween, 不走 damageNumbers)。 */
+  private floatingNumbers: Phaser.GameObjects.BitmapText[] = [];
   private nextEnemyId = 1;
 
   private hp = PLAYER_MAX_HP;
@@ -122,6 +150,26 @@ export class SideGameScene extends Phaser.Scene {
   private coins = 0;
   private roomCleared = false;
   private gameOverTriggered = false;
+
+  /** S2 房间链状态 (§4)。 */
+  private chain!: StageChain;
+  private roomIndex = 0;
+  private runSeed = 0;
+  private currentTemplate!: RoomTemplate;
+  /** 整关打通 (与 roomCleared 分离): 只有它才弹结算横幅并解锁 R/Esc。 */
+  private stageCleared = false;
+  private doorUsed = false;
+  private pendingTransition: { next: number } | null = null;
+  private doors: Door[] = [];
+  /** 诊断: submitDoor 被调用的总次数 (含被 doorUsed 挡下的重复提交)。 */
+  private doorSubmitAttempts = 0;
+  /** 诊断: 场景级 pointerdown 事件计数 (门点击失效排查用)。 */
+  private debugPointerDownCount = 0;
+  /** 房间代次: 换房时 +1, 让上一间房挂起的 POST_UPDATE 一次性回调失效。 */
+  private roomGeneration = 0;
+  private roomBannerText!: Phaser.GameObjects.BitmapText;
+  private roomBannerTimer?: Phaser.Time.TimerEvent;
+  private roomDecor: Phaser.GameObjects.GameObject[] = [];
 
   /** Game-feel counters exposed on the debug hook for E2E assertions. */
   private damageNumbersShown = 0;
@@ -169,6 +217,7 @@ export class SideGameScene extends Phaser.Scene {
 
   private hpText!: Phaser.GameObjects.BitmapText;
   private enemiesText!: Phaser.GameObjects.BitmapText;
+  private roomText!: Phaser.GameObjects.BitmapText;
   private coinsText!: Phaser.GameObjects.BitmapText;
   private rollHudText!: Phaser.GameObjects.BitmapText;
   private dashHudText!: Phaser.GameObjects.BitmapText;
@@ -190,7 +239,7 @@ export class SideGameScene extends Phaser.Scene {
     super('SideGameScene');
   }
 
-  create(): void {
+  create(data?: { seed?: number }): void {
     this.resetState();
     ensureGameTextures(this);
     buildNightAlleyBackdrop(this, 0);
@@ -202,16 +251,18 @@ export class SideGameScene extends Phaser.Scene {
       ARENA_HEIGHT - HUD_HEIGHT,
     );
 
-    this.createRoomGeometry();
+    this.createArenaBase();
     this.createPlayer();
     this.createHud();
     this.createClearBanner();
+    this.createRoomBanner();
     this.bindInputs();
 
-    const spawnXs = [460, 560, 660, 760, 840];
-    for (let i = 0; i < SIDE_INITIAL_ENEMIES; i += 1) {
-      this.spawnEnemy(spawnXs[i % spawnXs.length], SIDE_GROUND_Y - 32);
-    }
+    // 定种子 → 生成整条链 → 进第 1 间房。data.seed 优先 (Title/GameOver/R 重试传入);
+    // 无则消费一次待用调试种子, 再无则随机新种子。
+    this.runSeed = data?.seed ?? consumePendingSeed() ?? newRandomSeed();
+    this.chain = generateStage(this.runSeed);
+    this.enterRoom(0);
     this.updateHud();
 
     registerSideDebugHook({
@@ -227,6 +278,36 @@ export class SideGameScene extends Phaser.Scene {
         damageNumbersShown: this.damageNumbersShown,
         burstsSpawned: this.burstsSpawned,
         hitstopsApplied: this.hitstopsApplied,
+        seed: this.runSeed,
+        roomIndex: this.roomIndex,
+        roomType: this.currentTemplate.type,
+        roomCount: this.chain.slots.length,
+        roomTemplateId: this.currentTemplate.id,
+        stageCleared: this.stageCleared,
+        chainSignature: chainSignature(this.chain),
+        doors: this.doors.map(
+          (d): DoorDebugInfo => ({ choice: d.choice, label: d.label }),
+        ),
+        doorUsed: this.doorUsed,
+        pendingNext: this.pendingTransition ? this.pendingTransition.next : null,
+        doorSubmitAttempts: this.doorSubmitAttempts,
+        activeColliders: this.physics.world.colliders.getActive().length,
+        doorInput: this.doors.map((d) => ({
+          choice: d.choice,
+          hasInput: Boolean(d.bg.input),
+          enabled: d.bg.input ? d.bg.input.enabled : false,
+        })),
+        inputListSize: (this.input as unknown as { _list: unknown[] })._list.length,
+        pendingInsertionSize: (this.input as unknown as { _pendingInsertion: unknown[] })
+          ._pendingInsertion.length,
+        pointerDowns: this.debugPointerDownCount,
+        bodyBottom: Math.round(
+          (this.player.body as Phaser.Physics.Arcade.Body).bottom,
+        ),
+        grounded: (this.player.body as Phaser.Physics.Arcade.Body).blocked.down,
+        enemyBodyBottoms: this.enemies.map((e) =>
+          Math.round((e.sprite.body as Phaser.Physics.Arcade.Body).bottom),
+        ),
       }),
       spawnEnemyNearPlayer: () => {
         if (this.gameOverTriggered) {
@@ -239,10 +320,17 @@ export class SideGameScene extends Phaser.Scene {
           preferredX >= minX && preferredX <= maxX
             ? preferredX
             : Phaser.Math.Clamp(this.player.x - this.facing * 38, minX, maxX);
-        this.spawnEnemy(spawnX, this.player.y);
+        // 脚底锚点: 用玩家身体盒底 (body.bottom = sprite.y + 22) 作 surfaceY。
+        const footY = (this.player.body as Phaser.Physics.Arcade.Body).bottom;
+        this.spawnEnemyFromFoot(spawnX, footY);
         if (this.roomCleared) {
+          // 调试重生敌人 = 房间不再清空: 收门、撤结算横幅 (S1 语义)。
           this.roomCleared = false;
-          this.clearGroup.setVisible(false);
+          if (this.stageCleared) {
+            this.stageCleared = false;
+            this.clearGroup.setVisible(false);
+          }
+          this.hideDoors();
         }
         this.updateHud();
       },
@@ -255,6 +343,45 @@ export class SideGameScene extends Phaser.Scene {
         if (this.hp <= 0) {
           this.triggerGameOver();
         }
+      },
+      // 只写待用种子, 不改当前局; 下次开局 (经标题) 时消费一次。
+      setSeed: (seed: number) => {
+        setPendingSeed(seed);
+      },
+      // 测试专用: 直接进指定模板的房间 (Arcade 走跳验收用), 不走选门流程。
+      enterTemplate: (templateId: string) => {
+        const template = getTemplateById(templateId);
+        if (!template || this.gameOverTriggered) {
+          return;
+        }
+        this.clearRoomState();
+        this.enterRoomWithTemplate(template);
+        this.updateHud();
+      },
+      // 测试专用: 把玩家传送到指定位置 (走跳验收用)。
+      teleportPlayer: (x: number, y: number) => {
+        if (this.gameOverTriggered) {
+          return;
+        }
+        this.player.setAngle(0);
+        this.player.setAlpha(1);
+        const body = this.player.body as Phaser.Physics.Arcade.Body;
+        body.reset(x, y);
+        this.wasAirborne = false;
+      },
+      // 测试专用: 对当前活动指针做一次 hitTest (诊断点门失效)。
+      probeHit: () => {
+        const pointer = this.input.activePointer;
+        const over = this.input.hitTestPointer(pointer);
+        return {
+          px: Math.round(pointer.x),
+          py: Math.round(pointer.y),
+          over: over.map((o) => {
+            const pos = o as unknown as { x: number; y: number };
+            return `${o.type}@${Math.round(pos.x)},${Math.round(pos.y)}`;
+          }),
+          listSize: (this.input as unknown as { _list: unknown[] })._list.length,
+        };
       },
     });
   }
@@ -269,6 +396,15 @@ export class SideGameScene extends Phaser.Scene {
     this.coins = 0;
     this.roomCleared = false;
     this.gameOverTriggered = false;
+    this.roomIndex = 0;
+    this.runSeed = 0;
+    this.stageCleared = false;
+    this.doorUsed = false;
+    this.pendingTransition = null;
+    this.doors = [];
+    this.roomGeneration = 0;
+    this.roomBannerTimer = undefined;
+    this.roomDecor = [];
     this.damageNumbersShown = 0;
     this.burstsSpawned = 0;
     this.hitstopsApplied = 0;
@@ -296,17 +432,16 @@ export class SideGameScene extends Phaser.Scene {
     this.playerFlashTimer = 0;
   }
 
-  private createRoomGeometry(): void {
-    this.platforms = this.physics.add.staticGroup();
+  /** 竞技场底座: 常驻地面 + 空的可变平台组 (每间房按模板重建)。 */
+  private createArenaBase(): void {
+    this.groundGroup = this.physics.add.staticGroup();
 
     // Ground: top at y = 500
     const ground = this.add.rectangle(ARENA_WIDTH / 2, SIDE_GROUND_Y + 20, ARENA_WIDTH, 40, 0x2e2118).setDepth(4);
     this.add.rectangle(ARENA_WIDTH / 2, SIDE_GROUND_Y + 2, ARENA_WIDTH, 4, 0x8a5a33).setDepth(5);
-    this.platforms.add(ground);
+    this.groundGroup.add(ground);
 
-    // 2 static one-way platforms (heights y=412 and y=324, within single-jump reach 96px)
-    this.addPlatform(300, 420, 240, 16);
-    this.addPlatform(620, 332, 240, 16);
+    this.platforms = this.physics.add.staticGroup();
   }
 
   private addPlatform(x: number, y: number, w: number, h: number): void {
@@ -326,6 +461,7 @@ export class SideGameScene extends Phaser.Scene {
       .setSize(SIDE_PLAYER_BODY_WIDTH, SIDE_PLAYER_BODY_HEIGHT)
       .setOffset(SIDE_PLAYER_BODY_OFFSET_X, SIDE_PLAYER_BODY_OFFSET_Y);
 
+    this.physics.add.collider(this.player, this.groundGroup);
     this.physics.add.collider(this.player, this.platforms);
 
     this.chargeBg = this.add.rectangle(0, 0, 44, 6, 0x17120c).setDepth(15).setVisible(false);
@@ -354,9 +490,10 @@ export class SideGameScene extends Phaser.Scene {
 
     this.hpText = addPixelText(this, 20, 22, '', { size: 24, color: PALETTE.paperWhite, origin: [0, 0.5] }).setDepth(21);
     this.enemiesText = addPixelText(this, 200, 22, '', { size: 24, color: PALETTE.vermilion, origin: [0, 0.5] }).setDepth(21);
-    this.coinsText = addPixelText(this, 340, 22, '', { size: 24, color: PALETTE.lanternYellow, origin: [0, 0.5] }).setDepth(21);
-    this.rollHudText = addPixelText(this, 490, 22, '', { size: 24, color: PALETTE.silverBlue, origin: [0, 0.5] }).setDepth(21);
-    this.dashHudText = addPixelText(this, 680, 22, '', { size: 24, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
+    this.roomText = addPixelText(this, 290, 22, '', { size: 24, color: PALETTE.candleLight, origin: [0, 0.5] }).setDepth(21);
+    this.coinsText = addPixelText(this, 400, 22, '', { size: 24, color: PALETTE.lanternYellow, origin: [0, 0.5] }).setDepth(21);
+    this.rollHudText = addPixelText(this, 520, 22, '', { size: 24, color: PALETTE.silverBlue, origin: [0, 0.5] }).setDepth(21);
+    this.dashHudText = addPixelText(this, 660, 22, '', { size: 24, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
   }
 
   private createClearBanner(): void {
@@ -374,7 +511,7 @@ export class SideGameScene extends Phaser.Scene {
       color: PALETTE.candleLight,
       origin: 0.5,
     }).setDepth(26);
-    const hint = addPixelText(this, ARENA_WIDTH / 2, 272, '按 R 重开 · Esc 回标题', {
+    const hint = addPixelText(this, ARENA_WIDTH / 2, 272, 'R 重试本局 · Esc 返回标题', {
       size: 24,
       color: PALETTE.silverBlue,
       origin: 0.5,
@@ -384,8 +521,33 @@ export class SideGameScene extends Phaser.Scene {
     this.clearGroup.setVisible(false);
   }
 
+  /** 房间横幅 (enterRoom 时显示约 1.2s): 「夜巷 2/5 · 战斗 · 铜钱」。 */
+  private createRoomBanner(): void {
+    this.roomBannerText = addPixelText(this, ARENA_WIDTH / 2, 120, '', {
+      size: 24,
+      color: PALETTE.paperWhite,
+      origin: 0.5,
+    })
+      .setDepth(26)
+      .setVisible(false);
+  }
+
   private bindInputs(): void {
     const kb = this.input.keyboard;
+    // 诊断: 场景级 pointerdown 计数 (门点击失效排查用)。
+    this.input.on('pointerdown', () => {
+      this.debugPointerDownCount++;
+    });
+    // 门点击统一入口: 按实时门区判定, 不依赖 bg 的 setInteractive 注册时序
+    // (见 showDoors)。submitDoor 自带 doorUsed 锁定, 重复点击无效果。
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      for (const door of this.doors) {
+        if (door.bounds.contains(pointer.x, pointer.y)) {
+          this.submitDoor(door.choice);
+          return;
+        }
+      }
+    });
     if (!kb) {
       return;
     }
@@ -421,13 +583,14 @@ export class SideGameScene extends Phaser.Scene {
     };
 
     const onRestart = (): void => {
-      if (this.roomCleared) {
-        this.scene.restart();
+      // 只有整关打通 (stageCleared) 才解锁 R: 同种子重试本局。
+      if (this.stageCleared) {
+        this.scene.restart({ seed: this.runSeed });
       }
     };
 
     const onEscape = (): void => {
-      if (this.roomCleared) {
+      if (this.stageCleared) {
         this.scene.start('TitleScene');
       }
     };
@@ -441,6 +604,7 @@ export class SideGameScene extends Phaser.Scene {
       this.events.off(Phaser.Scenes.Events.DESTROY, cleanup);
       this.events.off(Phaser.Scenes.Events.PRE_RENDER, this.applyRenderOffsets, this);
       this.events.off(Phaser.Scenes.Events.RENDER, this.restoreRenderOffsets, this);
+      this.events.off(Phaser.Scenes.Events.POST_UPDATE, this.processPendingTransition, this);
       kb.off('keydown-J', onKeyDownJ);
       kb.off('keyup-J', onKeyUpJ);
       kb.off('keydown-R', onRestart);
@@ -457,14 +621,29 @@ export class SideGameScene extends Phaser.Scene {
     // render also keeps the final dash POST_UPDATE check unshifted.
     this.events.on(Phaser.Scenes.Events.PRE_RENDER, this.applyRenderOffsets, this);
     this.events.on(Phaser.Scenes.Events.RENDER, this.restoreRenderOffsets, this);
+
+    // 换房唯一执行点: 物理回调只提交 pendingTransition, 销毁/重建全部推迟到这里
+    // (POST_UPDATE 在物理步之后、渲染之前, 与 PRE_RENDER/RENDER 钩子不冲突:
+    //  换房时敌人已从数组移除, PRE_RENDER 不会再碰它们的击退偏移)。
+    this.events.on(Phaser.Scenes.Events.POST_UPDATE, this.processPendingTransition, this);
   }
 
-  private spawnEnemy(x: number, y: number): void {
-    const sprite = this.physics.add.sprite(x, y, 'enemy_paper').setDepth(7);
+  /**
+   * 按脚底锚点生成敌人: sprite.x = footX, sprite.y = surfaceY - 22
+   * (身体盒 28x46、offset (18,8) → 盒底 = sprite.y + 22, 正好落在 surfaceY 上)。
+   */
+  private spawnEnemyFromFoot(footX: number, surfaceY: number): void {
+    const sprite = this.physics.add.sprite(footX, surfaceY - 22, 'enemy_paper').setDepth(7);
     sprite.setCollideWorldBounds(true);
     const body = sprite.body as Phaser.Physics.Arcade.Body;
     body.setSize(28, 46).setOffset(18, 8);
-    this.physics.add.collider(sprite, this.platforms);
+    // setOffset 只改偏移量、不立即同步身体位置: 这里显式同步, 让 body.bottom
+    // 在生成当刻就对齐 surfaceY, 不依赖下一物理步的纠正。
+    body.updateFromGameObject();
+    const colliders = [
+      this.physics.add.collider(sprite, this.groundGroup),
+      this.physics.add.collider(sprite, this.platforms),
+    ];
 
     this.enemies.push({
       id: this.nextEnemyId++,
@@ -477,7 +656,319 @@ export class SideGameScene extends Phaser.Scene {
       knockY: 0,
       appliedKnockX: 0,
       appliedKnockY: 0,
+      colliders,
     });
+  }
+
+  /** 销毁一只敌人: 先显式销毁它的 collider, 再销毁 sprite, 不留残留碰撞体。 */
+  private destroyEnemyUnit(enemy: EnemyUnit): void {
+    for (const collider of enemy.colliders) {
+      collider.destroy();
+    }
+    enemy.colliders = [];
+    enemy.sprite.destroy();
+  }
+
+  // ---------------------------------------------------------------------------
+  // S2 房间链 (§4 场景接入)
+  // ---------------------------------------------------------------------------
+
+  /** 进第 i 间房: 清理旧房 → 按槽位模板重建。 */
+  private enterRoom(index: number): void {
+    this.clearRoomState();
+    this.roomIndex = index;
+    this.enterRoomWithTemplate(resolveTemplate(this.chain.slots[index]));
+  }
+
+  /** 按模板重建一间房 (几何、敌人、横幅); 调用方先做 clearRoomState。 */
+  private enterRoomWithTemplate(template: RoomTemplate): void {
+    this.currentTemplate = template;
+    this.roomCleared = false;
+    this.doorUsed = false;
+    this.pendingTransition = null;
+    // 结算状态也在这里清: 调试直进模板 (enterTemplate) 同样走这里,
+    // 精英房打通后直进有敌人的模板, 若不清 stageCleared/结算横幅,
+    // R/Esc 仍解锁且横幅还挂着, 与 roomCleared/stageCleared 分离冲突。
+    // 正常换房流程里进房时 stageCleared 恒为 false, 这里是 no-op。
+    this.stageCleared = false;
+    this.clearGroup.setVisible(false);
+    this.roomGeneration += 1;
+
+    for (const p of template.platforms) {
+      this.addPlatform(p.x, p.y, p.w, p.h);
+    }
+
+    if (template.type === 'shop') {
+      this.buildShopCounter();
+    }
+
+    this.resetPlayerForRoom();
+    for (const s of template.spawns) {
+      this.spawnEnemyFromFoot(s.footX, s.surfaceY);
+    }
+
+    // 模板带的铜钱 (宝箱房) 按现有掉落生命周期生成: 走近即拾取, 换房时未拾取的销毁。
+    if (template.coins) {
+      for (const c of template.coins) {
+        for (let i = 0; i < c.n; i += 1) {
+          this.spawnCoinDrop(c.x + (i - (c.n - 1) / 2) * 12, c.y);
+        }
+      }
+    }
+
+    this.showRoomBanner(
+      `夜巷 ${this.roomIndex + 1}/${this.chain.slots.length} · ${template.label}`,
+    );
+
+    // 初始化后统一检查: 零敌人房 (商店、空宝箱) 进房即清房。
+    if (this.enemies.length === 0) {
+      this.markRoomCleared();
+    }
+    this.updateHud();
+  }
+
+  /**
+   * 清理上一间房的全部房间资源 (§4 资源所有权):
+   * 可变平台成员、敌人 (含每只的 collider)、掉落、伤害数字、门 (overlap + 点击监听)、
+   * 房间横幅计时器、商店柜台。
+   * 地面、静态组本身、玩家与平台组的 collider 常驻不重建。
+   * 同时取消跨房瞬时状态 (§4 取消表); 保留 HP/铜钱/击杀数/runSeed/调试计数器。
+   */
+  private clearRoomState(): void {
+    for (const enemy of this.enemies) {
+      this.destroyEnemyUnit(enemy);
+    }
+    this.enemies = [];
+
+    for (const drop of this.coinDrops) {
+      drop.sprite.destroy();
+    }
+    this.coinDrops = [];
+
+    for (const entry of [...this.damageNumbers]) {
+      this.removeDamageNumber(entry);
+    }
+
+    // 玩家受击飘字不走 damageNumbers: 换房时同样销毁, 不留在旧坐标上。
+    for (const label of [...this.floatingNumbers]) {
+      this.tweens.killTweensOf(label);
+      if (label.active) {
+        label.destroy();
+      }
+    }
+    this.floatingNumbers = [];
+
+    this.hideDoors();
+
+    // 可变平台成员全部销毁 (静态体随 GameObject 销毁进 pendingDestroy, 下一步清理)。
+    this.platforms.clear(false, true);
+
+    for (const decor of this.roomDecor) {
+      decor.destroy();
+    }
+    this.roomDecor = [];
+
+    if (this.roomBannerTimer) {
+      this.roomBannerTimer.remove(false);
+      this.roomBannerTimer = undefined;
+    }
+    this.roomBannerText.setVisible(false);
+
+    // 取消跨房瞬时状态。
+    if (this.hitstopEvent) {
+      this.hitstopEvent.remove(false);
+      this.hitstopEvent = undefined;
+      this.physics.world.resume();
+    }
+    this.jHeld = false;
+    this.jHoldStartMs = 0;
+    this.hideChargeBar();
+    this.swingVisualTimer = 0;
+    this.rollTimer = 0;
+    this.rollCooldown = 0;
+    this.rollActiveThisFrame = false;
+    this.rollJustEnded = false;
+    this.dashTimer = 0;
+    this.dashCooldown = 0;
+    this.dashCleanupPending = false;
+    this.dashHitIds.clear();
+    this.squashPhase = null;
+    this.squashTimer = 0;
+    this.setPlayerVisualScale(1, 1);
+    this.playerFlashTimer = 0;
+    this.tweens.killTweensOf(this.screenFlash);
+    this.screenFlash.setAlpha(0);
+    this.wasAirborne = false;
+    this.afterimageTimer = 0;
+    this.speedLineTimer = 0;
+  }
+
+  /** 玩家回到入口点 (x=100, 地面): 身体盒底正好落在地面顶面。 */
+  private resetPlayerForRoom(): void {
+    this.player.setAngle(0);
+    this.player.setAlpha(1);
+    this.player.setFlipX(false);
+    this.player.setTexture('player_idle');
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    // 换房可能发生在冲刺中: 冲刺起手关了重力, 冲刺结束的清理
+    // (dashCleanupPending) 在 clearRoomState 里被取消, 而 body.reset() 不恢复
+    // allowGravity; 这里显式恢复, 否则新房里玩家跳起后不再下落。
+    body.setAllowGravity(true);
+    body.reset(100, SIDE_GROUND_Y - 22);
+    this.facing = 1;
+    this.walkTimer = 0;
+    this.walkFrame = false;
+  }
+
+  private showRoomBanner(text: string): void {
+    if (this.roomBannerTimer) {
+      this.roomBannerTimer.remove(false);
+    }
+    this.roomBannerText.setText(text).setVisible(true);
+    this.roomBannerTimer = this.time.delayedCall(1200, () => {
+      this.roomBannerTimer = undefined;
+      this.roomBannerText.setVisible(false);
+    });
+  }
+
+  /** 商店房只摆柜台, 不卖货 (购买是切片 (c))。柜台无碰撞体, 不挡移动。 */
+  private buildShopCounter(): void {
+    const counter = this.add
+      .rectangle(200, 460, 140, 80, 0x2e2118)
+      .setStrokeStyle(2, 0xc9973f)
+      .setDepth(4);
+    const label = addPixelText(this, 200, 412, '柜台', {
+      size: 12,
+      color: PALETTE.candleLight,
+      origin: 0.5,
+    }).setDepth(5);
+    this.roomDecor.push(counter, label);
+  }
+
+  /**
+   * 清房入口统一且幂等: killEnemy 的「敌人死光」与零敌人房共用。
+   * 非末槽 → 出门; 末槽 (roomIndex === slots.length - 1) → 整关结算。
+   * (b) 追加 Boss 格后, 精英房自动恢复为普通推进, 无需改分流逻辑。
+   */
+  private markRoomCleared(): void {
+    if (this.roomCleared) {
+      return;
+    }
+    this.roomCleared = true;
+    playSound('levelUp');
+    if (this.roomIndex === this.chain.slots.length - 1) {
+      this.stageCleared = true;
+      this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
+      this.clearGroup.setVisible(true);
+    } else {
+      this.showDoors();
+    }
+    this.updateHud();
+  }
+
+  /** 清房后出门: 门选的是下一个槽位 (§6: 清房 2 → 双门 → 选宝箱门 → 下一间是 chest)。
+   * 下一槽是分支格时两扇 (标两个候选的奖励), 固定格时一扇 (「继续前进」)。
+   * 只在非末槽调用, roomIndex + 1 一定存在。 */
+  private showDoors(): void {
+    if (this.doors.length > 0) {
+      return;
+    }
+    const nextSlot = this.chain.slots[this.roomIndex + 1];
+    const defs: { choice: number; label: string; x: number }[] =
+      nextSlot.slot.kind === 'choice'
+        ? [
+            { choice: 0, label: nextSlot.candidates[0].label, x: 740 },
+            { choice: 1, label: nextSlot.candidates[1].label, x: 830 },
+          ]
+        : [{ choice: 0, label: '继续前进', x: 785 }];
+    for (const def of defs) {
+      const y = SIDE_GROUND_Y - 45;
+      const bg = this.add
+        .rectangle(def.x, y, 60, 90, 0x2e2118)
+        .setStrokeStyle(2, 0xe8b34b)
+        .setDepth(9)
+        .setInteractive({ useHandCursor: true });
+      const labelText = addPixelText(this, def.x, y - 58, def.label, {
+        size: 12,
+        color: PALETTE.paperWhite,
+        origin: 0.5,
+      }).setDepth(10);
+      const zone = this.add.zone(def.x, y, 60, 90);
+      this.physics.add.existing(zone, true);
+      const bounds = new Phaser.Geom.Rectangle(def.x - 30, y - 45, 60, 90);
+      const overlap = this.physics.add.overlap(this.player, zone, () => {
+        this.onDoorOverlap(def.choice);
+      });
+      // 点击不走 bg 自身的 pointerdown: setInteractive 要到下一帧 preUpdate
+      // 才并入输入插件的 _list, 门出现后 1 帧内的点击会被静默丢弃; 点门由
+      // bindInputs 里的场景级 pointerdown 按实时门区统一处理, 门一出现即可点。
+      this.doors.push({
+        choice: def.choice,
+        label: def.label,
+        zone,
+        bg,
+        labelText,
+        bounds,
+        overlap,
+        // 门生成时若玩家已在门区内, overlap 须等玩家先离开、再重新进入才启用;
+        // 点击仍可作为显式选择。
+        overlapArmed: !Phaser.Geom.Intersects.RectangleToRectangle(
+          this.bodyBounds(this.player),
+          bounds,
+        ),
+      });
+    }
+  }
+
+  private hideDoors(): void {
+    for (const door of this.doors) {
+      door.overlap.destroy();
+      door.zone.destroy();
+      door.bg.destroy();
+      door.labelText.destroy();
+    }
+    this.doors = [];
+  }
+
+  private onDoorOverlap(choice: number): void {
+    const door = this.doors.find((d) => d.choice === choice);
+    if (!door || !door.overlapArmed || this.stageCleared || this.gameOverTriggered) {
+      return;
+    }
+    // doorUsed 锁定由 submitDoor 统一判: 被挡下的重叠尝试也要进 submitDoor
+    // 计数 (与点击同帧时, 两次尝试都应被观测到, 只第一次生效)。
+    this.submitDoor(choice);
+  }
+
+  /**
+   * 选门唯一提交入口: 只写 chosen、置 doorUsed、挂 pendingTransition。
+   * 销毁门、清理旧房、建新房全部推迟到 POST_UPDATE 执行点,
+   * 不在物理回调内销毁任何东西。doorUsed 锁定后重复提交直接返回。
+   */
+  private submitDoor(choice: number): void {
+    this.doorSubmitAttempts += 1;
+    if (this.doorUsed || this.stageCleared || this.gameOverTriggered) {
+      return;
+    }
+    const nextSlot = this.chain.slots[this.roomIndex + 1];
+    if (nextSlot && nextSlot.slot.kind === 'choice') {
+      nextSlot.chosen = choice;
+    }
+    this.doorUsed = true;
+    this.pendingTransition = { next: this.roomIndex + 1 };
+  }
+
+  /** POST_UPDATE 执行点: 执行挂起的换房 (与 PRE_RENDER/RENDER 钩子不冲突)。 */
+  private processPendingTransition(): void {
+    if (!this.pendingTransition) {
+      return;
+    }
+    const next = this.pendingTransition.next;
+    this.pendingTransition = null;
+    if (this.gameOverTriggered || next >= this.chain.slots.length) {
+      return;
+    }
+    this.enterRoom(next);
   }
 
   private releaseSwordAttack(heldMs?: number): void {
@@ -618,7 +1109,7 @@ export class SideGameScene extends Phaser.Scene {
     const body = enemy.sprite.body as Phaser.Physics.Arcade.Body;
     const ex = body.center.x;
     const ey = body.center.y;
-    enemy.sprite.destroy();
+    this.destroyEnemyUnit(enemy);
     this.enemies.splice(index, 1);
 
     this.kills += 1;
@@ -628,10 +1119,7 @@ export class SideGameScene extends Phaser.Scene {
     this.spawnCoinDrop(ex, ey);
 
     if (this.enemies.length === 0 && !this.roomCleared) {
-      this.roomCleared = true;
-      playSound('levelUp');
-      this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
-      this.clearGroup.setVisible(true);
+      this.markRoomCleared();
     }
     this.updateHud();
   }
@@ -676,12 +1164,19 @@ export class SideGameScene extends Phaser.Scene {
   /** Floating number for the player (simple path; enemy hits merge instead). */
   private spawnFloatingNumber(x: number, y: number, text: string, color: string): void {
     const label = addPixelText(this, x, y, text, { size: 12, color, origin: 0.5 }).setDepth(18);
+    this.floatingNumbers.push(label);
     this.tweens.add({
       targets: label,
       y: y - 24,
       alpha: 0,
       duration: 420,
-      onComplete: () => label.destroy(),
+      onComplete: () => {
+        const idx = this.floatingNumbers.indexOf(label);
+        if (idx !== -1) {
+          this.floatingNumbers.splice(idx, 1);
+        }
+        label.destroy();
+      },
     });
   }
 
@@ -810,6 +1305,9 @@ export class SideGameScene extends Phaser.Scene {
   private updateHud(): void {
     this.hpText.setText(`生命：${this.hp}/${PLAYER_MAX_HP}`);
     this.enemiesText.setText(`心魔：${this.enemies.length}`);
+    if (this.chain) {
+      this.roomText.setText(`夜巷 ${this.roomIndex + 1}/${this.chain.slots.length}`);
+    }
     this.coinsText.setText(`铜钱：${this.coins}`);
     this.rollHudText.setText(
       this.rollCooldown <= 0 ? '翻身 可用' : `翻身 ${this.rollCooldown.toFixed(1)}s`,
@@ -830,12 +1328,26 @@ export class SideGameScene extends Phaser.Scene {
     this.scene.start('GameOverScene', {
       kills: this.kills,
       coins: this.coins,
+      seed: this.runSeed,
     });
   }
 
   override update(_time: number, deltaMs: number): void {
     if (this.gameOverTriggered || this.physics.world.isPaused) {
       return;
+    }
+
+    // 门防误触: 未启用的 overlap 在玩家离开门区后启用 (再重新进入才触发)。
+    for (const door of this.doors) {
+      if (
+        !door.overlapArmed &&
+        !Phaser.Geom.Intersects.RectangleToRectangle(
+          this.bodyBounds(this.player),
+          door.bounds,
+        )
+      ) {
+        door.overlapArmed = true;
+      }
     }
 
     const dt = Math.min(deltaMs / 1000, 0.05);
@@ -864,8 +1376,10 @@ export class SideGameScene extends Phaser.Scene {
       this.dashCleanupPending = false;
       body.setAllowGravity(true);
       this.player.setAngle(0);
+      // 换房会让挂起的回调失效 (代次对不上就跳过, 不对新房的敌人做判定)。
+      const generation = this.roomGeneration;
       this.events.once(Phaser.Scenes.Events.POST_UPDATE, () => {
-        if (!this.gameOverTriggered) {
+        if (!this.gameOverTriggered && generation === this.roomGeneration) {
           this.checkDashHits();
         }
       });

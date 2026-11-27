@@ -1,57 +1,6 @@
-import { expect, Page, test } from '@playwright/test';
-import type { SideviewDebugState } from '../../src/game/sideDebug.ts';
-
-async function waitForCanvasAndDebug(page: Page): Promise<void> {
-  await page.waitForSelector('canvas', { state: 'visible' });
-  await page.waitForFunction(() => Boolean(window.__SIDEVIEW_DEBUG__));
-}
-
-async function getState(page: Page): Promise<SideviewDebugState> {
-  return page.evaluate(() => {
-    if (!window.__SIDEVIEW_DEBUG__) {
-      throw new Error('Missing __SIDEVIEW_DEBUG__');
-    }
-    return window.__SIDEVIEW_DEBUG__.getState();
-  });
-}
-
-async function startGame(page: Page): Promise<void> {
-  await page.goto('/');
-  await waitForCanvasAndDebug(page);
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) => {
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-      }),
-  );
-  const box = await page.locator('canvas').boundingBox();
-  if (!box || box.width <= 0 || box.height <= 0) {
-    throw new Error('Canvas bounding box is empty');
-  }
-  await page.mouse.click(box.x + (480 / 960) * box.width, box.y + (300 / 540) * box.height);
-  await page.waitForFunction(() => window.__SIDEVIEW_DEBUG__?.getState().scene === 'SideGameScene');
-}
-
-async function clearRoom(page: Page): Promise<void> {
-  // Kill everything: repeatedly spawn one near the player and slash twice.
-  // The 5 initial enemies walk toward the player and get slashed on arrival.
-  for (let i = 0; i < 40; i += 1) {
-    const state = await getState(page);
-    if (state.roomCleared) {
-      break;
-    }
-    await page.evaluate(() => {
-      window.__SIDEVIEW_DEBUG__?.spawnEnemyNearPlayer();
-    });
-    await page.keyboard.press('KeyJ');
-    await page.waitForTimeout(320);
-    await page.keyboard.press('KeyJ');
-    await page.waitForTimeout(320);
-  }
-  await page.waitForFunction(() => window.__SIDEVIEW_DEBUG__?.getState().roomCleared === true, undefined, {
-    timeout: 30000,
-  });
-}
+import { expect, test } from '@playwright/test';
+import { chainSignature, generateStage } from '../../src/game/rooms.ts';
+import { clearStage, getState, startGame } from './helpers.ts';
 
 test.describe('Night Alley Sideview Smoke', () => {
   test.beforeEach(async ({ page }) => {
@@ -62,7 +11,8 @@ test.describe('Night Alley Sideview Smoke', () => {
 
   test('loads canvas, title screen, and serves BGM asset', async ({ page }) => {
     await page.goto('/');
-    await waitForCanvasAndDebug(page);
+    await page.waitForSelector('canvas', { state: 'visible' });
+    await page.waitForFunction(() => Boolean(window.__SIDEVIEW_DEBUG__));
 
     const box = await page.locator('canvas').boundingBox();
     expect(box).not.toBeNull();
@@ -84,7 +34,8 @@ test.describe('Night Alley Sideview Smoke', () => {
     });
     const before = await getState(page);
     expect(before.hp).toBe(30);
-    expect(before.enemiesAlive).toBe(5);
+    // The entrance room spawns 3 demons (S2 slice (a) template).
+    expect(before.enemiesAlive).toBe(3);
 
     await page.keyboard.down('KeyD');
     await page.waitForTimeout(500);
@@ -209,10 +160,13 @@ test.describe('Night Alley Sideview Smoke', () => {
     expect(state.scene).toBe('GameOverScene');
   });
 
-  test('room clear then R restarts the run', async ({ page }) => {
-    test.setTimeout(120000);
+  test('stage clear then R restarts the run with the same seed', async ({ page }) => {
+    test.setTimeout(180000);
     await startGame(page);
-    await clearRoom(page);
+    await clearStage(page);
+
+    const cleared = await getState(page);
+    expect(cleared.stageCleared).toBe(true);
 
     await page.keyboard.press('KeyR');
     // Wait for post-restart state, not just the scene key: the scene is
@@ -221,7 +175,14 @@ test.describe('Night Alley Sideview Smoke', () => {
     await page.waitForFunction(
       () => {
         const s = window.__SIDEVIEW_DEBUG__?.getState();
-        return s?.scene === 'SideGameScene' && s.kills === 0 && s.roomCleared === false && s.enemiesAlive === 5;
+        return (
+          s?.scene === 'SideGameScene' &&
+          s.kills === 0 &&
+          s.roomCleared === false &&
+          s.stageCleared === false &&
+          s.roomIndex === 0 &&
+          s.enemiesAlive === 3
+        );
       },
       undefined,
       { timeout: 10000 },
@@ -230,13 +191,16 @@ test.describe('Night Alley Sideview Smoke', () => {
     expect(state.scene).toBe('SideGameScene');
     expect(state.kills).toBe(0);
     expect(state.hp).toBe(30);
-    expect(state.enemiesAlive).toBe(5);
+    expect(state.enemiesAlive).toBe(3);
+    expect(state.seed).toBe(cleared.seed);
+    // Same seed, fresh chain: the branch choice resets to null.
+    expect(state.chainSignature).toBe(chainSignature(generateStage(cleared.seed)));
   });
 
-  test('room clear then Esc returns to title', async ({ page }) => {
-    test.setTimeout(120000);
+  test('stage clear then Esc returns to title', async ({ page }) => {
+    test.setTimeout(180000);
     await startGame(page);
-    await clearRoom(page);
+    await clearStage(page);
 
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => window.__SIDEVIEW_DEBUG__?.getState().scene === 'TitleScene');

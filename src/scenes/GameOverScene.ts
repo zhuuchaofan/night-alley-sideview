@@ -2,16 +2,20 @@ import Phaser from 'phaser';
 import { ARENA_HEIGHT, ARENA_WIDTH } from '../game/balance.ts';
 import { addPixelText } from '../game/pixelFont.ts';
 import { buildNightAlleyBackdrop, ensureGameTextures, PALETTE } from '../game/pixelart.ts';
-import { registerSideDebugHook } from '../game/sideDebug.ts';
+import { setPendingSeed } from '../game/seedStore.ts';
+import { DEFAULT_STAGE_DEBUG_STATE, registerSideDebugHook } from '../game/sideDebug.ts';
 
 interface GameOverData {
   kills: number;
   coins: number;
+  /** 同种子重试用: 死亡局的 runSeed。 */
+  seed?: number;
 }
 
 export class GameOverScene extends Phaser.Scene {
   private kills = 0;
   private coins = 0;
+  private seed = 0;
 
   constructor() {
     super('GameOverScene');
@@ -20,6 +24,7 @@ export class GameOverScene extends Phaser.Scene {
   init(data?: GameOverData): void {
     this.kills = data?.kills ?? 0;
     this.coins = data?.coins ?? 0;
+    this.seed = data?.seed ?? 0;
   }
 
   create(): void {
@@ -55,7 +60,8 @@ export class GameOverScene extends Phaser.Scene {
     }).setDepth(11);
 
     this.createButton(360, 345, '再来一局', 0x2e2118, 0xe8b34b, () => {
-      this.scene.start('SideGameScene');
+      // 同种子重试: 链与首局一致 (分支 chosen 恢复为 null)。
+      this.scene.start('SideGameScene', { seed: this.seed });
     });
 
     this.createButton(600, 345, '返回标题', 0x10182b, 0x8fa8c8, () => {
@@ -70,7 +76,7 @@ export class GameOverScene extends Phaser.Scene {
 
     const kb = this.input.keyboard;
     const onRestart = (): void => {
-      this.scene.start('SideGameScene');
+      this.scene.start('SideGameScene', { seed: this.seed });
     };
     const onEscape = (): void => {
       this.scene.start('TitleScene');
@@ -99,9 +105,14 @@ export class GameOverScene extends Phaser.Scene {
         damageNumbersShown: 0,
         burstsSpawned: 0,
         hitstopsApplied: 0,
+        ...DEFAULT_STAGE_DEBUG_STATE,
+        seed: this.seed,
       }),
       spawnEnemyNearPlayer: () => {},
       setHp: () => {},
+      setSeed: (seed: number) => {
+        setPendingSeed(seed);
+      },
     });
   }
 
