@@ -17,6 +17,8 @@ import {
   SIDE_DASH_DAMAGE,
   SIDE_DASH_DURATION,
   SIDE_DASH_SPEED,
+  SIDE_ENEMY_VISUAL_GAP,
+  SIDE_ENEMY_SEPARATION_MARGIN,
   SIDE_GROUND_Y,
   SIDE_HEAVY_DAMAGE,
   SIDE_HEAVY_HEIGHT,
@@ -95,6 +97,8 @@ interface EnemyUnit {
   attackCooldown: number;
   coinDrops: number;
   baseScale: number;
+  /** 精灵可见宽度 (display px, 供视觉分离用; 身体盒仍是 28×46)。 */
+  visualWidth: number;
   stunScale: number;
   contactCooldown: number;
   stunTimer: number;
@@ -796,6 +800,7 @@ export class SideGameScene extends Phaser.Scene {
       attackCooldown: cfg.attackCooldown,
       coinDrops: cfg.coinDrops,
       baseScale: cfg.visualScale,
+      visualWidth: cfg.visualWidth,
       stunScale: cfg.stunScale,
       contactCooldown: 0,
       stunTimer: 0,
@@ -1850,7 +1855,12 @@ export class SideGameScene extends Phaser.Scene {
     this.applyEnemySeparation();
   }
 
-  /** 怪与怪水平分离: 同高度层敌人不许叠团遮挡, 硬直/冻结怪保持定身不参与分离。 */
+  /**
+   * 怪与怪水平分离: 同高度层敌人不许叠团遮挡, 硬直/冻结怪保持定身不参与分离。
+   * 按可见宽度分 (不是身体盒 28px): 身体盒分开时精灵仍重叠 16px 以上,
+   * 白底贴图糊成一团、画面只见 1 只 (live 回归, 见 tests/e2e/clump.spec.ts)。
+   * 接触判定仍用身体盒, 伤害数值不动。
+   */
   private applyEnemySeparation(): void {
     const minWallX = SIDE_WALL_WIDTH + 16;
     const maxWallX = ARENA_WIDTH - SIDE_WALL_WIDTH - 16;
@@ -1872,7 +1882,13 @@ export class SideGameScene extends Phaser.Scene {
           if (ba.bottom <= bb.top || bb.bottom <= ba.top) {
             continue;
           }
-          const minSep = (ba.width + bb.width) * 0.5;
+          // 视觉分离: 可见宽度之和的一半 + 空隙 + 余量。身体盒 (28px) 只管接触判定,
+          // 怪与怪之间按这个距离站, 画面上才是分开的个体。余量让静息间距恒在
+          // 验收阈值之上, 不被帧间逼近 (疾纸人冲锋约 3px/帧) 瞬时越线。
+          const minSep =
+            (a.visualWidth + b.visualWidth) * 0.5 +
+            SIDE_ENEMY_VISUAL_GAP +
+            SIDE_ENEMY_SEPARATION_MARGIN;
           const dx = ba.center.x - bb.center.x;
           const absDx = Math.abs(dx);
           if (absDx >= minSep) {

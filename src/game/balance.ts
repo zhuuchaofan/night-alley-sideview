@@ -344,6 +344,31 @@ export const SIDE_ENEMY_BODY_HEIGHT = 46;
 export const SIDE_ENEMY_BODY_OFFSET_X = 18;
 export const SIDE_ENEMY_BODY_OFFSET_Y = 8;
 
+/**
+ * 敌人精灵可见宽度 (display px): 32 格贴图可见列 × 2 (SPRITE_PIXEL_SCALE) × visualScale。
+ * 由 src/data/pixelart.ts 实测: paper/lantern 列 5–26 (22 格), swift 列 2–27 (26 格),
+ * shooter 列 3–29 (27 格), elite 列 1–30 (30 格), boss 列 0–31 (32 格)。
+ * 怪分离按身体盒 28px 分时, 可见画 (44–54px) 仍重叠 16px 以上、画面糊成一团,
+ * 所以分离改按可见宽度 (见 applyEnemySeparation); 身体盒仍是 28×46, 接触判定不动。
+ */
+export const SIDE_ENEMY_VISUAL_WIDTH: Record<EnemyKind, number> = {
+  paper: 44,
+  lantern: 44,
+  swift: 52,
+  shooter: 54,
+  elite: 75,
+  boss: 102,
+};
+/** 视觉分离空隙: 同层两怪可见边缘之间留的空隙 (白底贴图贴边仍会糊成一团)。 */
+export const SIDE_ENEMY_VISUAL_GAP = 8;
+/**
+ * 分离余量: 分离把怪推到阈值 + 该余量的位置, 而不是恰好贴在阈值上。
+ * 分离在 updateEnemies 里跑在物理步之前, 疾纸人冲锋一帧能逼近约 3px;
+ * 没有余量时, 采样会在帧间抓到 1–3px 的瞬时越线 (live 回归初版: 6.7% 采样违例、
+ * 全部是单采样孤立越线)。余量 6px 盖住单帧最大逼近, 静息间距恒在阈值之上。
+ */
+export const SIDE_ENEMY_SEPARATION_MARGIN = 6;
+
 export interface SideEnemyConfig {
   kind: EnemyKind;
   maxHp: number;
@@ -352,6 +377,7 @@ export interface SideEnemyConfig {
   attackCooldown: number;
   coinDrops: number;
   visualScale: number;
+  visualWidth: number;
   stunScale: number;
 }
 
@@ -366,6 +392,7 @@ export function sideEnemyStatsForKind(kind: EnemyKind): SideEnemyConfig {
       attackCooldown: BOSS_ATTACK_COOLDOWN,
       coinDrops: 0,
       visualScale: 1.6,
+      visualWidth: SIDE_ENEMY_VISUAL_WIDTH.boss,
       stunScale: 0.25,
     };
   }
@@ -379,6 +406,7 @@ export function sideEnemyStatsForKind(kind: EnemyKind): SideEnemyConfig {
       attackCooldown: SIDE_ENEMY_CONTACT_COOLDOWN,
       coinDrops: ELITE_XP_ORBS, // 3
       visualScale: 1.25,
+      visualWidth: SIDE_ENEMY_VISUAL_WIDTH.elite,
       stunScale: 0.5,
     };
   }
@@ -390,6 +418,7 @@ export function sideEnemyStatsForKind(kind: EnemyKind): SideEnemyConfig {
     attackCooldown: SIDE_ENEMY_CONTACT_COOLDOWN,
     coinDrops: 1,
     visualScale: 1,
+    visualWidth: SIDE_ENEMY_VISUAL_WIDTH[kind],
     stunScale: 1,
   };
 }
