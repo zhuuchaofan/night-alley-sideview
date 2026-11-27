@@ -12,6 +12,10 @@ export interface SideviewDebugState {
   roomCleared: boolean;
   soundMuted: boolean;
   bgmStarted: boolean;
+  /** Game-feel counters (SideGameScene only; other scenes report 0). */
+  damageNumbersShown: number;
+  burstsSpawned: number;
+  hitstopsApplied: number;
 }
 
 export type SceneSideviewDebugState = Omit<SideviewDebugState, 'soundMuted' | 'bgmStarted'>;

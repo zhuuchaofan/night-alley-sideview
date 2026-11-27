@@ -1,4 +1,4 @@
-export type SoundCue = 'swing' | 'hit' | 'kill' | 'levelUp' | 'bossEntrance';
+export type SoundCue = 'swing' | 'hit' | 'kill' | 'levelUp' | 'bossEntrance' | 'hurt';
 
 export interface SoundState {
   soundUnlocked: boolean;
@@ -23,6 +23,7 @@ let noiseBuffer: AudioBuffer | null = null;
 let muted = false;
 let lastHitTime = -Infinity;
 let lastKillTime = -Infinity;
+let lastHurtTime = -Infinity;
 
 function getAudioContextConstructor(): AudioContextConstructor | undefined {
   const g = globalThis as typeof globalThis & {
@@ -181,6 +182,11 @@ export function playSound(cue: SoundCue): void {
       return;
     }
     lastKillTime = t;
+  } else if (cue === 'hurt') {
+    if (t - lastHurtTime < COMBAT_GATE_SECONDS - GATE_EPSILON) {
+      return;
+    }
+    lastHurtTime = t;
   }
 
   switch (cue) {
@@ -246,6 +252,20 @@ export function playSound(cue: SoundCue): void {
       }
       break;
     }
+    case 'hurt':
+      // Player takes a hit: lower and duller than 'hit' so dealing damage
+      // and taking damage never share a sound.
+      scheduleOscLayer(ctx, masterGain, 'triangle', 190, 75, t, 70, [
+        { ms: 0, gain: 0 },
+        { ms: 4, gain: 0.3 },
+        { ms: 70, gain: 0 },
+      ]);
+      scheduleNoiseLayer(ctx, masterGain, 'lowpass', 900, 0.707, t, [
+        { ms: 0, gain: 0 },
+        { ms: 3, gain: 0.18 },
+        { ms: 40, gain: 0 },
+      ]);
+      break;
     case 'bossEntrance':
       scheduleOscLayer(ctx, masterGain, 'triangle', 110, 55, t, 420, [
         { ms: 0, gain: 0 },

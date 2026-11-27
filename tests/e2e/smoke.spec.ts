@@ -115,6 +115,44 @@ test.describe('Night Alley Sideview Smoke', () => {
     expect(state.kills).toBeGreaterThanOrEqual(1);
   });
 
+  test('sword hits show damage numbers, apply hitstop, and kills burst', async ({ page }) => {
+    await startGame(page);
+
+    // Slash until a damage number (and its hitstop) registers. Each retry
+    // re-spawns a fresh enemy in front of the player, so a retry never
+    // repeats the same facing and position after the target walked past.
+    for (let i = 0; i < 10; i += 1) {
+      const s = await getState(page);
+      if (s.damageNumbersShown >= 1) {
+        break;
+      }
+      await page.evaluate(() => {
+        window.__SIDEVIEW_DEBUG__?.spawnEnemyNearPlayer();
+      });
+      await page.keyboard.press('KeyJ');
+      await page.waitForTimeout(320);
+    }
+    const afterHit = await getState(page);
+    expect(afterHit.damageNumbersShown).toBeGreaterThanOrEqual(1);
+    expect(afterHit.hitstopsApplied).toBeGreaterThanOrEqual(1);
+
+    // Keep slashing until the kill, then the death burst must have fired.
+    for (let i = 0; i < 10; i += 1) {
+      const s = await getState(page);
+      if (s.kills >= 1) {
+        break;
+      }
+      await page.evaluate(() => {
+        window.__SIDEVIEW_DEBUG__?.spawnEnemyNearPlayer();
+      });
+      await page.keyboard.press('KeyJ');
+      await page.waitForTimeout(320);
+    }
+    const afterKill = await getState(page);
+    expect(afterKill.kills).toBeGreaterThanOrEqual(1);
+    expect(afterKill.burstsSpawned).toBeGreaterThanOrEqual(1);
+  });
+
   test('holding J past the charge threshold releases a heavy strike', async ({ page }) => {
     await startGame(page);
 
