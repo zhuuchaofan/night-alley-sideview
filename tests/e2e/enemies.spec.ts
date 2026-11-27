@@ -606,4 +606,38 @@ test.describe('Night Alley S2 Slice (b): Contact, Separation & 6 Enemy Kinds', (
     expect(after.stageCleared).toBe(true);
     expect(after.hp).toBe(1);
   });
+
+  test('invisible-enemy: live chaser parks at a readable standoff, never on the player centre', async ({
+    page,
+  }) => {
+    test.setTimeout(30000);
+    await startGame(page, 1005);
+    await page.evaluate(() => {
+      window.__SIDEVIEW_DEBUG__?.clearEnemies?.();
+      window.__SIDEVIEW_DEBUG__?.setHp(30);
+      window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(480, 478);
+      window.__SIDEVIEW_DEBUG__?.placeTestEnemy?.('paper', 600, 500, false);
+    });
+    // Let the chaser close the 120px gap (55px/s ≈ 2.2s), then sample 2s.
+    await page.waitForTimeout(4000);
+    let minDx = Number.POSITIVE_INFINITY;
+    const startMs = Date.now();
+    while (Date.now() - startMs < 2000) {
+      const s = await getState(page);
+      const e = s.enemyInfos?.[0];
+      if (e) {
+        minDx = Math.min(minDx, Math.abs(e.x - s.x));
+      }
+      await page.waitForTimeout(50);
+    }
+    const final = await getState(page);
+    // The enemy must stay a readable distance off the player's centre:
+    // before the fix it parks at |dx| < 6, hidden behind the player sprite
+    // (depth 7 < 8, both figures ~44px wide) while still dealing damage.
+    expect(minDx).toBeGreaterThanOrEqual(20);
+    // ...and it must still be a threat: contact damage keeps ticking at the
+    // standoff (body boxes still overlap 4px), so HP must have dropped.
+    expect(final.hp).toBeLessThan(30);
+    expect(final.enemiesAlive).toBe(1);
+  });
 });

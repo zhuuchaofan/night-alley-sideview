@@ -369,6 +369,17 @@ export const SIDE_ENEMY_VISUAL_GAP = 8;
  */
 export const SIDE_ENEMY_SEPARATION_MARGIN = 6;
 
+/**
+ * 近战追敌的停手距离 (中心距 px): 玩家身体半宽 14 + 敌人身体半宽 14
+ * − 4px 接触咬合。旧死区 |dx| < 6 会让怪把中心走到玩家正中心、画在
+ * 玩家下面 (depth 7 < 8), 两幅人形 (玩家 42px / 心魔 44px) 几乎完全
+ * 重合而看不见, 却仍在掉血 (live 回归, 见 tests/e2e/enemies.spec.ts)。
+ * 24px 时身体盒仍重叠 4px、接触伤害照常触发; 怪的人形约 20px 露在
+ * 玩家身侧, 可读可打。冲锋/疾攻的瞬时越线 (windup/冲刺中) 不受此限:
+ * 停手只管 updateEnemyAi 的追击步, 越线后追击步会把它退回 24px。
+ */
+export const SIDE_ENEMY_CHASE_STANDOFF = 24;
+
 export interface SideEnemyConfig {
   kind: EnemyKind;
   maxHp: number;

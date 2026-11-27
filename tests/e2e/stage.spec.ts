@@ -117,6 +117,48 @@ test.describe('Night Alley S2 Stage', () => {
     expect(final.stageCleared).toBe(true);
   });
 
+  test('branch doors enter different templates: left door enters the combat candidate, right door the chest candidate', async ({
+    page,
+  }) => {
+    test.setTimeout(120000);
+    // Same seed, two runs: the branch slot pre-draws one combat and one
+    // chest candidate; each door must enter its own candidate's template,
+    // not the same layout twice (live report: "两扇门进的都是同一布局的第 3 间房").
+    const chain = generateStage(SEED);
+    const branch = chain.slots[2];
+    expect(branch.slot.kind).toBe('choice');
+    expect(branch.candidates).toHaveLength(2);
+    expect(branch.candidates[0].id).not.toBe(branch.candidates[1].id);
+
+    // Left door (choice 0) -> combat candidate.
+    await startGame(page, SEED);
+    await clearCurrentRoom(page);
+    await advanceRoom(page, 0);
+    await clearCurrentRoom(page);
+    let state = await getState(page);
+    expect(state.doors).toHaveLength(2);
+    expect(state.doors[0].label).toBe(branch.candidates[0].label);
+    expect(state.doors[1].label).toBe(branch.candidates[1].label);
+    await clickDoor(page, 0);
+    await waitForRoomIndex(page, 2);
+    state = await getState(page);
+    expect(state.roomType).toBe('combat');
+    expect(state.roomTemplateId).toBe(branch.candidates[0].id);
+
+    // Same seed, fresh run: right door (choice 1) -> chest candidate.
+    await startGame(page, SEED);
+    await clearCurrentRoom(page);
+    await advanceRoom(page, 0);
+    await clearCurrentRoom(page);
+    state = await getState(page);
+    expect(state.doors).toHaveLength(2);
+    await clickDoor(page, 1);
+    await waitForRoomIndex(page, 2);
+    state = await getState(page);
+    expect(state.roomType).toBe('chest');
+    expect(state.roomTemplateId).toBe(branch.candidates[1].id);
+  });
+
   test('door does not auto-fire when the player stands in the doorway at clear time', async ({
     page,
   }) => {

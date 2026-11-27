@@ -18,6 +18,7 @@ import {
   SIDE_DASH_DURATION,
   SIDE_DASH_SPEED,
   SIDE_ENEMY_VISUAL_GAP,
+  SIDE_ENEMY_CHASE_STANDOFF,
   SIDE_ENEMY_SEPARATION_MARGIN,
   SIDE_GROUND_Y,
   SIDE_HEAVY_DAMAGE,
@@ -1805,7 +1806,18 @@ export class SideGameScene extends Phaser.Scene {
       const eBody = enemy.sprite.body as Phaser.Physics.Arcade.Body;
       const dx = this.player.x - enemy.sprite.x;
       const dy = this.player.y - enemy.sprite.y;
-      const dir = Math.abs(dx) < 6 ? 0 : dx > 0 ? 1 : -1;
+      // 近战追敌在身体盒边停手 (SIDE_ENEMY_CHASE_STANDOFF = 24): 走到
+      // 24px 即停; 被冲锋/分离/玩家穿身顶进 24px 以内时, 退回 24px 而不是
+      // 赖在玩家正中心 (旧死区 |dx| < 6 的隐形怪回归)。
+      // dx === 0 时按 id 定边, 与分离的平局处理一致。
+      let dir: number;
+      if (Math.abs(dx) > SIDE_ENEMY_CHASE_STANDOFF) {
+        dir = dx > 0 ? 1 : -1;
+      } else if (Math.abs(dx) < SIDE_ENEMY_CHASE_STANDOFF) {
+        dir = dx === 0 ? (enemy.id % 2 === 0 ? 1 : -1) : dx > 0 ? -1 : 1;
+      } else {
+        dir = 0;
+      }
 
       if (enemy.frozen) {
         eBody.setVelocityX(0);
@@ -2002,7 +2014,8 @@ export class SideGameScene extends Phaser.Scene {
       }
       eBody.setVelocityX(dir * enemy.speed);
       if (dir !== 0) {
-        enemy.sprite.setFlipX(dir < 0);
+        // 退回停手距离时仍面向玩家 (dir 此时背向玩家)。
+        enemy.sprite.setFlipX(faceDir < 0);
       }
       return;
     }
@@ -2085,7 +2098,8 @@ export class SideGameScene extends Phaser.Scene {
       }
       eBody.setVelocityX(dir * moveSpeed);
       if (dir !== 0) {
-        enemy.sprite.setFlipX(dir < 0);
+        // 退回停手距离时仍面向玩家 (dir 此时背向玩家)。
+        enemy.sprite.setFlipX(faceDir < 0);
       }
       return;
     }
@@ -2093,7 +2107,8 @@ export class SideGameScene extends Phaser.Scene {
     // paper, lantern, elite: 稳定追击玩家
     eBody.setVelocityX(dir * enemy.speed);
     if (dir !== 0) {
-      enemy.sprite.setFlipX(dir < 0);
+      // 退回停手距离时仍面向玩家 (dir 此时背向玩家)。
+      enemy.sprite.setFlipX(faceDir < 0);
     }
   }
 
