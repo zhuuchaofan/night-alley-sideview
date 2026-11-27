@@ -148,6 +148,47 @@ export async function waitForRoomIndex(page: Page, index: number): Promise<void>
   );
 }
 
+/** 按住 D 向右走, 直到玩家中心 x >= targetX (8s 上限)。返回 'reached' /
+ * 'room-changed'（中途已换房：走路提前触发了别的门）/ 'timeout'。
+ * 松开 D 由 finally 保证。调用方按返回值断言，不要只等 roomIndex。 */
+export async function walkRightToX(
+  page: Page,
+  targetX: number,
+  roomIndex: number,
+): Promise<'reached' | 'room-changed' | 'timeout'> {
+  await page.keyboard.down('KeyD');
+  try {
+    return await page.evaluate(
+      async ({ tx, ri }) => {
+        const dbg = window.__SIDEVIEW_DEBUG__!;
+        for (let i = 0; i < 160; i += 1) {
+          const s = dbg.getState();
+          if (s.roomIndex !== ri) {
+            return 'room-changed' as const;
+          }
+          if ((s.x ?? 0) >= tx) {
+            return 'reached' as const;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return 'timeout' as const;
+      },
+      { tx: targetX, ri: roomIndex },
+    );
+  } finally {
+    await page.keyboard.up('KeyD');
+  }
+}
+
+/** 按 E 确认进门：按住约 100ms 再松开。直接 press（亚帧点按）会被
+ * Phaser 的 JustDown 漏掉（keydown 与 keyup 落在同一帧内，update 轮询
+ * 前就被 keyup 清掉——仓库里 Space/K 跳跃已有同样教训）。 */
+export async function pressDoorConfirm(page: Page): Promise<void> {
+  await page.keyboard.down('KeyE');
+  await page.waitForTimeout(100);
+  await page.keyboard.up('KeyE');
+}
+
 /** 当前房间已清房时, 点一扇门进下一间。 */
 export async function advanceRoom(page: Page, choice = 0): Promise<void> {
   const before = await getState(page);

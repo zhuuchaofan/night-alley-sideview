@@ -13,9 +13,11 @@ import {
   clickGamePoint,
   dispatchTwoDoorClicks,
   getState,
+  pressDoorConfirm,
   startGame,
   waitForDoorsRegistered,
   waitForRoomIndex,
+  walkRightToX,
 } from './helpers.ts';
 
 const SEED = 20261127;
@@ -220,7 +222,7 @@ test.describe('Night Alley S2 Stage', () => {
     expect(after.chainSignature).toBe(expected.replace(':null', ':0'));
   });
 
-  test('click and overlap in the same frame advance exactly one room', async ({
+  test('standing in a branch doorway does not auto-enter; clicking the other door wins', async ({
     page,
   }) => {
     test.setTimeout(120000);
@@ -234,43 +236,25 @@ test.describe('Night Alley S2 Stage', () => {
     expect(before.doors).toHaveLength(2);
     const attemptsBefore = before.doorSubmitAttempts;
 
-    // One JS task: teleport the player into the left doorway and click the
-    // right door. The click submits synchronously (choice 1); the left
-    // door's overlap can only fire on the next physics step, when doorUsed
-    // already locks it out. (JS tasks are atomic, so no physics step can
-    // interleave between the teleport and the click.)
-    // Phaser's fixed-timestep world may run a frame with ZERO physics steps
-    // (World.js: willStep = _elapsed >= msPerFrame); if that frame's
-    // POST_UPDATE consumed the click's transition first, the overlap would
-    // never fire and attempts would stay 1. Busy-wait 40ms in the same task
-    // so the next frame's delta guarantees at least one physics step before
-    // POST_UPDATE consumes the transition.
+    // Branch doors no longer fire on overlap: teleport into the left
+    // doorway and let several physics steps pass — the room must not
+    // change and no submitDoor attempt may be recorded. (Before the fix
+    // this is exactly how the left door hijacked a walk to the right door.)
     await page.evaluate(() => {
       window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(740, 478);
-      const canvas = document.querySelector('canvas');
-      if (!canvas) {
-        throw new Error('no canvas');
-      }
-      const rect = canvas.getBoundingClientRect();
-      canvas.dispatchEvent(
-        new MouseEvent('mousedown', {
-          bubbles: true,
-          clientX: rect.left + (830 / 960) * rect.width,
-          clientY: rect.top + (455 / 540) * rect.height,
-          button: 0,
-        }),
-      );
-      const end = performance.now() + 40;
-      while (performance.now() < end) {
-        // busy-wait: inflate the next frame's delta past one physics step.
-      }
     });
+    await page.waitForTimeout(500);
+    const standing = await getState(page);
+    expect(standing.roomIndex).toBe(1);
+    expect(standing.doorSubmitAttempts).toBe(attemptsBefore);
+
+    // Clicking the right door still submits directly (choice 1).
+    await clickDoor(page, 1);
     await waitForRoomIndex(page, 2);
     const after = await getState(page);
     expect(after.roomIndex).toBe(2);
-    // Both attempts happened (click + overlap), but only the first (the click,
-    // choice 1) committed.
-    expect(after.doorSubmitAttempts - attemptsBefore).toBe(2);
+    // Only the click submitted: the overlap never counted an attempt.
+    expect(after.doorSubmitAttempts - attemptsBefore).toBe(1);
     expect(after.roomType).toBe('chest');
     expect(after.chainSignature).toBe(expected.replace(':null', ':1'));
   });
@@ -329,25 +313,26 @@ test.describe('Night Alley S2 Stage', () => {
     test.setTimeout(120000);
     await startGame(page, SEED);
 
-    await clearCurrentRoom(page);
-    await advanceRoom(page, 0);
+    // Dash into the room-1 SINGLE door ("继续前进", still walk-through):
+    // branch doors need an E confirm, so a mid-dash branch entry can no
+    // longer happen — the single door keeps the original coverage (the
+    // overlap fires mid-dash, so the room changes while the dash still has
+    // gravity disabled).
     await clearCurrentRoom(page);
     const before = await getState(page);
-    expect(before.doors).toHaveLength(2);
+    expect(before.doors).toHaveLength(1);
 
-    // Dash (L) into the left doorway from just short of it: the overlap
-    // fires mid-dash (dash 0.18s at 520px/s), so the room changes while
-    // the dash still has gravity disabled. (No walk-in first: walking
-    // right from the teleport point for a fixed 50ms is a coin flip on
-    // frame phase — the body crosses into the zone on the 2nd or 3rd step —
-    // and the teleport already leaves the player 6px short of the zone.)
+    // Dash (L) into the doorway from just short of it: the overlap fires
+    // mid-dash (dash 0.18s at 520px/s covers 93px; the zone starts 51px
+    // ahead of the teleport point), so the room changes while the dash
+    // still has gravity disabled.
     await page.evaluate(() => {
       window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(690, 478);
     });
-    expect((await getState(page)).roomIndex).toBe(1);
+    expect((await getState(page)).roomIndex).toBe(0);
     await page.keyboard.down('KeyD');
     await page.keyboard.press('KeyL');
-    await waitForRoomIndex(page, 2);
+    await waitForRoomIndex(page, 1);
     await page.keyboard.up('KeyD');
     const after = await getState(page);
     expect(after.roomType).toBe('combat');
@@ -425,13 +410,48 @@ test.describe('Night Alley S2 Stage', () => {
     // the 90px-tall doorways (door width 60px), so the left door cannot be
     // jumped over from the ground. Teleport into the gap (x=785: body
     // [771,799] clears the left zone [710,770]) and walk right into the
-    // right door; the entry itself is by walking + physics overlap.
+    // right door; the entry itself is by walking + pressing E (branch
+    // doors no longer fire on overlap: walking in from the entrance would
+    // otherwise hit the left door first — see the test above).
     await page.evaluate(() => {
       window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(785, 478);
     });
-    await page.keyboard.down('KeyD');
+    const outcome = await walkRightToX(page, 815, 1);
+    expect(outcome).toBe('reached');
+    await pressDoorConfirm(page);
     await waitForRoomIndex(page, 2);
-    await page.keyboard.up('KeyD');
+    const after = await getState(page);
+    expect(after.roomType).toBe('chest');
+    expect(after.chainSignature).toBe(
+      chainSignature(generateStage(SEED)).replace(':null', ':1'),
+    );
+  });
+
+  test('walking from the entrance to the right branch door enters its room', async ({
+    page,
+  }) => {
+    test.setTimeout(120000);
+    await startGame(page, SEED);
+
+    await clearCurrentRoom(page);
+    await advanceRoom(page, 0);
+    await clearCurrentRoom(page);
+    const before = await getState(page);
+    expect(before.doors).toHaveLength(2);
+
+    // Live report: walking right from the room entrance reaches the left
+    // door first (zones [710,770] / [800,860] sit side by side), so the
+    // right door ("宝箱 · 铜钱") could only be reached by clicking.
+    // Walk the whole way from the entrance (x=100, the room-entry spawn)
+    // without touching the mouse: the player must pass the left doorway
+    // without entering it, arrive at the right doorway, and confirm with E.
+    await page.evaluate(() => {
+      window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(100, 478);
+    });
+    const outcome = await walkRightToX(page, 815, 1);
+    expect(outcome).toBe('reached');
+    await pressDoorConfirm(page);
+    await waitForRoomIndex(page, 2);
     const after = await getState(page);
     expect(after.roomType).toBe('chest');
     expect(after.chainSignature).toBe(
@@ -449,9 +469,17 @@ test.describe('Night Alley S2 Stage', () => {
     const before = await getState(page);
     expect(before.doors).toHaveLength(2);
 
-    await page.keyboard.down('KeyD');
+    // Branch doors need an E confirm: walk from the entrance to the left
+    // doorway (body [721,749] at x=735 strictly overlaps the left zone
+    // [710,770]) and press E. Walking on without pressing E must not enter
+    // either door — that is what lets the player reach the right door.
+    await page.evaluate(() => {
+      window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(100, 478);
+    });
+    const outcome = await walkRightToX(page, 735, 1);
+    expect(outcome).toBe('reached');
+    await pressDoorConfirm(page);
     await waitForRoomIndex(page, 2);
-    await page.keyboard.up('KeyD');
     const after = await getState(page);
     expect(after.roomType).toBe('combat');
   });

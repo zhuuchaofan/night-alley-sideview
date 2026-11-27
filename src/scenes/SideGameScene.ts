@@ -206,6 +206,8 @@ export class SideGameScene extends Phaser.Scene {
   private doors: Door[] = [];
   /** 诊断: submitDoor 被调用的总次数 (含被 doorUsed 挡下的重复提交)。 */
   private doorSubmitAttempts = 0;
+  /** 双门时站在门区内显示的「按 E 进入」提示（单门走路即进，不用提示）。 */
+  private doorHintText!: Phaser.GameObjects.BitmapText;
   /** 诊断: 场景级 pointerdown 事件计数 (门点击失效排查用)。 */
   private debugPointerDownCount = 0;
   /** 房间代次: 换房时 +1, 让上一间房挂起的 POST_UPDATE 一次性回调失效。 */
@@ -281,6 +283,8 @@ export class SideGameScene extends Phaser.Scene {
   private keyJ!: Phaser.Input.Keyboard.Key;
   private keyShift!: Phaser.Input.Keyboard.Key;
   private keyL!: Phaser.Input.Keyboard.Key;
+  /** 双门进门确认键 (E)：站在门区内按 E 进该门（见 updateBranchDoorPrompt）。 */
+  private keyE!: Phaser.Input.Keyboard.Key;
 
   constructor() {
     super('SideGameScene');
@@ -661,6 +665,15 @@ export class SideGameScene extends Phaser.Scene {
     })
       .setDepth(26)
       .setVisible(false);
+    // 双门确认提示：平时隐藏，updateBranchDoorPrompt 在玩家站进某扇门区时
+    // 移到该门上方显示。字全部在字库内（按/E/进/入）。
+    this.doorHintText = addPixelText(this, ARENA_WIDTH / 2, 372, '按 E 进入', {
+      size: 12,
+      color: PALETTE.lanternYellow,
+      origin: 0.5,
+    })
+      .setDepth(11)
+      .setVisible(false);
   }
 
   private bindInputs(): void {
@@ -692,6 +705,7 @@ export class SideGameScene extends Phaser.Scene {
     this.keyJ = kb.addKey(Phaser.Input.Keyboard.KeyCodes.J);
     this.keyShift = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
     this.keyL = kb.addKey(Phaser.Input.Keyboard.KeyCodes.L);
+    this.keyE = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
     const onKeyDownJ = (event: KeyboardEvent): void => {
       if (this.gameOverTriggered || this.rollTimer > 0 || this.dashTimer > 0 || this.jHeld) {
@@ -1093,6 +1107,7 @@ export class SideGameScene extends Phaser.Scene {
       door.labelText.destroy();
     }
     this.doors = [];
+    this.doorHintText.setVisible(false);
   }
 
   private onDoorOverlap(choice: number): void {
@@ -1100,9 +1115,52 @@ export class SideGameScene extends Phaser.Scene {
     if (!door || !door.overlapArmed || this.stageCleared || this.gameOverTriggered) {
       return;
     }
+    // 双门（choice 格）不靠重叠进门：两扇门紧贴（区 [710,770]/[800,860]），
+    // 走路从左向右必然先撞左门，右门永远走不到。双门只在玩家站进门区后按 E
+    // 确认（见 updateBranchDoorPrompt），重叠回调到此为止；单门（「继续前进」）
+    // 只有一个选择，走路即进保持不变。
+    if (this.doors.length !== 1) {
+      return;
+    }
     // doorUsed 锁定由 submitDoor 统一判: 被挡下的重叠尝试也要进 submitDoor
     // 计数 (与点击同帧时, 两次尝试都应被观测到, 只第一次生效)。
     this.submitDoor(choice);
+  }
+
+  /**
+   * 双门（choice 格）按键确认：每帧按身体盒与门区的严格相交算出玩家正站
+   * 在哪扇门里（两门之间 30px 间隙里哪扇都不是），把那扇门的框加粗描金并
+   * 在其上方显示「按 E 进入」；按 E 提交该门。走路穿过门区本身不触发——
+   * 两扇门紧贴，走路即进会让右门永远到不了。单门（「继续前进」）走路即进，
+   * 不走这里（提示与加粗只在双门时出现）。
+   */
+  private updateBranchDoorPrompt(): void {
+    if (this.doors.length !== 2 || this.stageCleared || this.gameOverTriggered) {
+      this.doorHintText.setVisible(false);
+      for (const door of this.doors) {
+        door.bg.setStrokeStyle(2, 0xe8b34b);
+      }
+      return;
+    }
+    const pBounds = this.bodyBounds(this.player);
+    const active = this.doors.find((d) => rectsStrictlyOverlap(pBounds, d.bounds));
+    for (const door of this.doors) {
+      if (door === active) {
+        door.bg.setStrokeStyle(3, 0xffd34d);
+      } else {
+        door.bg.setStrokeStyle(2, 0xe8b34b);
+      }
+    }
+    if (!active) {
+      this.doorHintText.setVisible(false);
+      return;
+    }
+    this.doorHintText
+      .setPosition(active.bounds.centerX, active.bounds.top - 38)
+      .setVisible(true);
+    if (Phaser.Input.Keyboard.JustDown(this.keyE)) {
+      this.submitDoor(active.choice);
+    }
   }
 
   /**
@@ -1532,6 +1590,8 @@ export class SideGameScene extends Phaser.Scene {
         door.overlapArmed = true;
       }
     }
+
+    this.updateBranchDoorPrompt();
 
     const dt = Math.min(deltaMs / 1000, 0.05);
     this.swingCooldown = Math.max(0, this.swingCooldown - dt);
