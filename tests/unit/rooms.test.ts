@@ -1,3 +1,20 @@
+import {
+  BOSS_ATTACK_COOLDOWN,
+  BOSS_CONTACT_DAMAGE,
+  BOSS_MAX_HP,
+  BOSS_SPEED,
+  ELITE_XP_ORBS,
+  ENEMY_CONTACT_DAMAGE,
+  SIDE_ENEMY_BODY_HEIGHT,
+  SIDE_ENEMY_BODY_WIDTH,
+  SIDE_ENEMY_CONTACT_COOLDOWN,
+  sideEnemyStatsForKind,
+  SWIFT_HP,
+} from '../../src/game/balance.ts';
+import {
+  compensateEnemyBodyScale,
+  rectsStrictlyOverlap,
+} from '../../src/game/sideFeel.ts';
 import { describe, expect, it } from 'vitest';
 import {
   chainSignature,
@@ -31,11 +48,12 @@ describe('rooms: generateStage', () => {
     const b = generateStage(12345);
     expect(chainSignature(a)).toBe(chainSignature(b));
     expect(a.seed).toBe(12345);
-    expect(a.slots).toHaveLength(5);
+    expect(a.slots).toHaveLength(6);
     expect(a.slots.map((s) => s.slot.kind)).toEqual([
       'fixed',
       'fixed',
       'choice',
+      'fixed',
       'fixed',
       'fixed',
     ]);
@@ -46,12 +64,13 @@ describe('rooms: generateStage', () => {
     expect(sigs.size).toBeGreaterThan(1);
   });
 
-  it('first slot is entrance, contains at least one shop, last slot is elite', () => {
+  it('first slot is entrance, contains at least one shop, last slot is boss', () => {
     const chain = generateStage(999);
     expect(chain.slots[0].candidates[0].type).toBe('entrance');
     expect(chain.slots.some((s) => s.candidates[0].type === 'shop')).toBe(true);
+    expect(chain.slots[4].candidates[0].type).toBe('elite');
     const last = chain.slots[chain.slots.length - 1];
-    expect(last.candidates[0].type).toBe('elite');
+    expect(last.candidates[0].type).toBe('boss');
   });
 
   it('choice slot has two candidates of different reward types', () => {
@@ -97,17 +116,18 @@ describe('rooms: generateStage', () => {
 });
 
 describe('rooms: handwritten templates', () => {
-  it('has exactly 7 templates: 1 entrance, 3 combat, 1 chest, 1 shop, 1 elite', () => {
+  it('has exactly 8 templates: 1 entrance, 3 combat, 1 chest, 1 shop, 1 elite, 1 boss', () => {
     const counts = new Map<string, number>();
     for (const t of ROOM_TEMPLATES) {
       counts.set(t.type, (counts.get(t.type) ?? 0) + 1);
     }
-    expect(ROOM_TEMPLATES).toHaveLength(7);
+    expect(ROOM_TEMPLATES).toHaveLength(8);
     expect(counts.get('entrance')).toBe(1);
     expect(counts.get('combat')).toBe(3);
     expect(counts.get('chest')).toBe(1);
     expect(counts.get('shop')).toBe(1);
     expect(counts.get('elite')).toBe(1);
+    expect(counts.get('boss')).toBe(1);
   });
 
   it('every handwritten template passes isRoomReachable', () => {
@@ -270,5 +290,62 @@ describe('rooms: mulberry32 and pickTemplate', () => {
     // use a rng that picks the good one first instead.
     const rng = () => 0.9;
     expect(pickTemplate([bad, good], rng)).toBe(good);
+  });
+});
+
+describe('balance: sideEnemyStatsForKind', () => {
+  it('returns expected stats for all 6 enemy kinds', () => {
+    const paper = sideEnemyStatsForKind('paper');
+    expect(paper.maxHp).toBe(8);
+    expect(paper.contactDamage).toBe(1);
+    expect(paper.attackCooldown).toBe(1.75);
+    expect(ENEMY_CONTACT_DAMAGE).toBe(1);
+    expect(SIDE_ENEMY_CONTACT_COOLDOWN).toBe(1.75);
+
+    const lantern = sideEnemyStatsForKind('lantern');
+    expect(lantern.maxHp).toBe(paper.maxHp);
+    expect(lantern.speed).toBe(paper.speed);
+    expect(lantern.contactDamage).toBe(1);
+    expect(lantern.attackCooldown).toBe(1.75);
+    expect(lantern.coinDrops).toBe(1);
+
+    const swift = sideEnemyStatsForKind('swift');
+    expect(swift.maxHp).toBe(2);
+    expect(swift.maxHp).toBe(SWIFT_HP);
+    expect(swift.speed).toBeCloseTo(paper.speed * 1.5, 4);
+
+    const shooter = sideEnemyStatsForKind('shooter');
+    expect(shooter.speed).toBeLessThan(paper.speed);
+    expect(shooter.contactDamage).toBe(1);
+    expect(shooter.attackCooldown).toBe(1.75);
+
+    const elite = sideEnemyStatsForKind('elite');
+    expect(elite.maxHp).toBe(36);
+    expect(elite.coinDrops).toBe(3);
+    expect(elite.coinDrops).toBe(ELITE_XP_ORBS);
+
+    const boss = sideEnemyStatsForKind('boss');
+    expect(boss.maxHp).toBe(BOSS_MAX_HP);
+    expect(boss.speed).toBe(BOSS_SPEED);
+    expect(boss.contactDamage).toBe(BOSS_CONTACT_DAMAGE);
+    expect(boss.attackCooldown).toBe(BOSS_ATTACK_COOLDOWN);
+  });
+});
+
+describe('sideFeel: compensateEnemyBodyScale & rectsStrictlyOverlap', () => {
+  it('keeps enemy physics body 28x46 across visual scales', () => {
+    for (const scale of [1, 1.18, 1.25, 1.6, 1.6 * 1.18]) {
+      const comp = compensateEnemyBodyScale(scale);
+      expect(comp.width * scale).toBeCloseTo(SIDE_ENEMY_BODY_WIDTH, 5);
+      expect(comp.height * scale).toBeCloseTo(SIDE_ENEMY_BODY_HEIGHT, 5);
+    }
+  });
+
+  it('treats touching edges (0px overlap) as non-overlapping', () => {
+    const a = { x: 286, y: 452, width: 28, height: 48 };
+    const touching = { x: 314, y: 454, width: 28, height: 46 };
+    const overlapping = { x: 313, y: 454, width: 28, height: 46 };
+    expect(rectsStrictlyOverlap(a, touching)).toBe(false);
+    expect(rectsStrictlyOverlap(a, overlapping)).toBe(true);
   });
 });

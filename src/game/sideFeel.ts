@@ -1,3 +1,10 @@
+import {
+  SIDE_ENEMY_BODY_HEIGHT,
+  SIDE_ENEMY_BODY_OFFSET_X,
+  SIDE_ENEMY_BODY_OFFSET_Y,
+  SIDE_ENEMY_BODY_WIDTH,
+} from './balance.ts';
+
 /**
  * S1.5 game-feel tuning for the side-view prototype — presentation only.
  *
@@ -197,6 +204,25 @@ export function computeSideCoinScatterOffset(
   };
 }
 
+function compensateBodyScale(
+  baseWidth: number,
+  baseHeight: number,
+  baseOffsetX: number,
+  baseOffsetY: number,
+  origin: number,
+  sx: number,
+  sy: number,
+): PlayerBodyCompensation {
+  const safeSx = Math.abs(sx) < 0.01 ? 0.01 : sx;
+  const safeSy = Math.abs(sy) < 0.01 ? 0.01 : sy;
+  return {
+    width: baseWidth / safeSx,
+    height: baseHeight / safeSy,
+    offsetX: origin + (baseOffsetX - origin) / safeSx,
+    offsetY: origin + (baseOffsetY - origin) / safeSy,
+  };
+}
+
 /**
  * Body size/offset that keeps the player's physics body exactly at
  * 28x48 in the same place while the sprite is visually scaled to (sx, sy).
@@ -207,13 +233,42 @@ export function computeSideCoinScatterOffset(
  * squash & stretch stays purely visual. Call with (1, 1) to restore.
  */
 export function compensatePlayerBodyScale(sx: number, sy: number): PlayerBodyCompensation {
-  const safeSx = Math.abs(sx) < 0.01 ? 0.01 : sx;
-  const safeSy = Math.abs(sy) < 0.01 ? 0.01 : sy;
-  const o = SIDE_PLAYER_TEXTURE_ORIGIN;
-  return {
-    width: SIDE_PLAYER_BODY_WIDTH / safeSx,
-    height: SIDE_PLAYER_BODY_HEIGHT / safeSy,
-    offsetX: o + (SIDE_PLAYER_BODY_OFFSET_X - o) / safeSx,
-    offsetY: o + (SIDE_PLAYER_BODY_OFFSET_Y - o) / safeSy,
-  };
+  return compensateBodyScale(
+    SIDE_PLAYER_BODY_WIDTH,
+    SIDE_PLAYER_BODY_HEIGHT,
+    SIDE_PLAYER_BODY_OFFSET_X,
+    SIDE_PLAYER_BODY_OFFSET_Y,
+    SIDE_PLAYER_TEXTURE_ORIGIN,
+    sx,
+    sy,
+  );
+}
+
+/**
+ * Body size/offset that keeps an enemy's physics body fixed at 28x46
+ * regardless of visual scale (elite 1.25x, boss 1.6x, contact flash 1.18x).
+ */
+export function compensateEnemyBodyScale(sx: number, sy: number = sx): PlayerBodyCompensation {
+  return compensateBodyScale(
+    SIDE_ENEMY_BODY_WIDTH,
+    SIDE_ENEMY_BODY_HEIGHT,
+    SIDE_ENEMY_BODY_OFFSET_X,
+    SIDE_ENEMY_BODY_OFFSET_Y,
+    SIDE_PLAYER_TEXTURE_ORIGIN,
+    sx,
+    sy,
+  );
+}
+
+/** Strict AABB overlap check: touching edges (zero overlap) return false. */
+export function rectsStrictlyOverlap(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+): boolean {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
 }

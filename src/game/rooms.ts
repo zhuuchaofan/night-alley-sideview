@@ -7,7 +7,7 @@
  * 跳跃物理 (balance.ts, 不改): 重力 1400, 跳速 -520, 移速 160,
  * 最大跳高 520^2/(2*1400) ≈ 96.6px。玩家身体盒 28x48 (半宽 14px)。
  */
-import { ARENA_WIDTH, SIDE_GROUND_Y, SIDE_WALL_WIDTH } from './balance.ts';
+import { ARENA_WIDTH, type EnemyKind, SIDE_GROUND_Y, SIDE_WALL_WIDTH } from './balance.ts';
 
 export type RoomType = 'entrance' | 'combat' | 'shop' | 'elite' | 'chest' | 'boss';
 
@@ -19,9 +19,9 @@ export interface PlatformDef {
   h: number;
 }
 
-/** 生成点: 脚底锚点。转换: sprite.x = footX, sprite.y = surfaceY - 22 (身体盒底 = sprite.y + 22)。 */
+/** 生成点: 脚底锚点。转换: sprite.x = footX, sprite.y = surfaceY - 22 * scale (身体盒底 = surfaceY)。 */
 export interface SpawnDef {
-  kind: 'paper';
+  kind: EnemyKind;
   footX: number;
   surfaceY: number;
 }
@@ -255,9 +255,9 @@ export const ROOM_TEMPLATES: RoomTemplate[] = [
     ],
     spawns: [
       { kind: 'paper', footX: 500, surfaceY: 500 },
-      { kind: 'paper', footX: 620, surfaceY: 500 },
-      { kind: 'paper', footX: 760, surfaceY: 500 },
-      { kind: 'paper', footX: 480, surfaceY: 388 },
+      { kind: 'lantern', footX: 620, surfaceY: 500 },
+      { kind: 'swift', footX: 760, surfaceY: 500 },
+      { kind: 'shooter', footX: 480, surfaceY: 388 },
     ],
   },
   {
@@ -271,9 +271,9 @@ export const ROOM_TEMPLATES: RoomTemplate[] = [
     ],
     spawns: [
       { kind: 'paper', footX: 420, surfaceY: 500 },
-      { kind: 'paper', footX: 700, surfaceY: 500 },
-      { kind: 'paper', footX: 300, surfaceY: 428 },
-      { kind: 'paper', footX: 480, surfaceY: 344 },
+      { kind: 'swift', footX: 700, surfaceY: 500 },
+      { kind: 'lantern', footX: 300, surfaceY: 428 },
+      { kind: 'shooter', footX: 480, surfaceY: 344 },
     ],
   },
   {
@@ -289,9 +289,9 @@ export const ROOM_TEMPLATES: RoomTemplate[] = [
       { x: 720, y: 344, w: 200, h: 16 },
     ],
     spawns: [
-      { kind: 'paper', footX: 400, surfaceY: 500 },
-      { kind: 'paper', footX: 620, surfaceY: 500 },
-      { kind: 'paper', footX: 800, surfaceY: 500 },
+      { kind: 'lantern', footX: 430, surfaceY: 500 },
+      { kind: 'swift', footX: 620, surfaceY: 500 },
+      { kind: 'shooter', footX: 800, surfaceY: 500 },
       { kind: 'paper', footX: 480, surfaceY: 392 },
     ],
   },
@@ -326,11 +326,22 @@ export const ROOM_TEMPLATES: RoomTemplate[] = [
       { x: 740, y: 324, w: 200, h: 16 },
     ],
     spawns: [
-      { kind: 'paper', footX: 420, surfaceY: 500 },
-      { kind: 'paper', footX: 600, surfaceY: 500 },
-      { kind: 'paper', footX: 780, surfaceY: 500 },
-      { kind: 'paper', footX: 260, surfaceY: 440 },
-      { kind: 'paper', footX: 500, surfaceY: 376 },
+      { kind: 'elite', footX: 620, surfaceY: 500 },
+      { kind: 'paper', footX: 460, surfaceY: 500 },
+      { kind: 'lantern', footX: 780, surfaceY: 500 },
+    ],
+  },
+  {
+    id: 'boss-1',
+    type: 'boss',
+    label: '头目 · 大心魔',
+    platforms: [
+      { x: 260, y: 444, w: 200, h: 16 },
+      { x: 700, y: 444, w: 200, h: 16 },
+      { x: 480, y: 376, w: 220, h: 16 },
+    ],
+    spawns: [
+      { kind: 'boss', footX: 830, surfaceY: 500 },
     ],
   },
 ];
@@ -388,8 +399,8 @@ export function pickTemplate(pool: RoomTemplate[], rng: () => number): RoomTempl
 }
 
 /**
- * 骨架 (切片 (a), 5 间): 入口 → 战斗 → 分支(战斗|宝箱) → 商店 → 精英。
- * 商店是精英前的固定格。(b) 在末尾追加 fixed boss, 共 6 间。
+ * 骨架 (切片 (b), 6 间): 入口 → 战斗 → 分支(战斗|宝箱) → 商店 → 精英 → Boss。
+ * 商店是精英前的固定格, Boss 击杀即清关结算。
  */
 export const STAGE_SKELETON: StageSlot[] = [
   { kind: 'fixed', type: 'entrance' },
@@ -397,6 +408,7 @@ export const STAGE_SKELETON: StageSlot[] = [
   { kind: 'choice', options: ['combat', 'chest'] },
   { kind: 'fixed', type: 'shop' },
   { kind: 'fixed', type: 'elite' },
+  { kind: 'fixed', type: 'boss' },
 ];
 
 /**

@@ -27,7 +27,7 @@ test.describe('Night Alley S2 Stage', () => {
     });
   });
 
-  test('full run, chest route: rooms progress 1-5, shop auto-clears, elite clears the stage', async ({
+  test('full run, chest route: rooms progress 1-6, shop auto-clears, boss clears the stage', async ({
     page,
   }) => {
     test.setTimeout(180000);
@@ -39,7 +39,7 @@ test.describe('Night Alley S2 Stage', () => {
     expect(state.chainSignature).toBe(expected);
     expect(state.roomIndex).toBe(0);
     expect(state.roomType).toBe('entrance');
-    expect(state.roomCount).toBe(5);
+    expect(state.roomCount).toBe(6);
 
     // Room 1 (entrance, 3 demons) -> single door -> room 2.
     await clearCurrentRoom(page);
@@ -77,7 +77,18 @@ test.describe('Night Alley S2 Stage', () => {
     expect(state.roomIndex).toBe(4);
     expect(state.roomType).toBe('elite');
 
-    // Room 5 (elite) -> stage cleared banner.
+    // Room 5 (elite) -> single door -> room 6 (boss).
+    await clearCurrentRoom(page);
+    state = await getState(page);
+    expect(state.roomCleared).toBe(true);
+    expect(state.stageCleared).toBe(false);
+    expect(state.doors).toHaveLength(1);
+    await advanceRoom(page, 0);
+    state = await getState(page);
+    expect(state.roomIndex).toBe(5);
+    expect(state.roomType).toBe('boss');
+
+    // Room 6 (boss) -> stage cleared banner.
     await clearCurrentRoom(page);
     state = await getState(page);
     expect(state.stageCleared).toBe(true);
@@ -438,7 +449,7 @@ test.describe('Night Alley S2 Stage', () => {
     expect(first.seed).toBe(SEED);
     expect(first.chainSignature).toBe(chainSignature(generateStage(SEED)));
     expect(first.chainSignature).toContain(':null');
-    expect(first.roomCount).toBe(5);
+    expect(first.roomCount).toBe(6);
 
     await startGame(page, SEED);
     const second = await getState(page);
@@ -603,7 +614,7 @@ test.describe('Night Alley S2 Stage', () => {
     expect(still.roomIndex).toBe(roomIndex);
   });
 
-  test('spawn conversion: every enemy body bottom aligns with its spawn surface', async ({
+  test('spawn conversion: every enemy body bottom aligns with its spawn surface and clears platforms', async ({
     page,
   }) => {
     test.setTimeout(120000);
@@ -613,22 +624,50 @@ test.describe('Night Alley S2 Stage', () => {
       if (template.spawns.length === 0) {
         continue;
       }
-      // Enter the template and read the body bottoms in the SAME evaluate
+      // Enter the template and read the body bounds in the SAME evaluate
       // task: the read happens before any physics step, so a mis-anchored
       // spawn cannot be corrected by gravity first (the old 120ms wait hid
       // that). spawnEnemyFromFoot also syncs each body right after sizing it.
       const state = await page.evaluate((id) => {
         window.__SIDEVIEW_DEBUG__?.enterTemplate?.(id);
         const s = window.__SIDEVIEW_DEBUG__?.getState();
-        return { enemiesAlive: s?.enemiesAlive ?? -1, bottoms: s?.enemyBodyBottoms ?? [] };
+        return {
+          enemiesAlive: s?.enemiesAlive ?? -1,
+          bottoms: s?.enemyBodyBottoms ?? [],
+          infos: s?.enemyInfos ?? [],
+        };
       }, template.id);
       expect(state.enemiesAlive).toBe(template.spawns.length);
       expect(state.bottoms).toHaveLength(template.spawns.length);
       template.spawns.forEach((spawn, i) => {
+        const info = state.infos[i];
         expect(
           Math.abs((state.bottoms[i] as number) - spawn.surfaceY),
           `${template.id} spawn ${i} should sit on ${spawn.surfaceY}`,
         ).toBeLessThanOrEqual(2);
+        expect(
+          info.bodyRight - info.bodyLeft,
+          `${template.id} spawn ${i} (${spawn.kind}) width should be 28`,
+        ).toBe(28);
+        expect(
+          info.bodyBottom - info.bodyTop,
+          `${template.id} spawn ${i} (${spawn.kind}) height should be 46`,
+        ).toBe(46);
+        for (const p of template.platforms) {
+          const pLeft = p.x - p.w / 2;
+          const pRight = p.x + p.w / 2;
+          const pTop = p.y - p.h / 2;
+          const pBottom = p.y + p.h / 2;
+          const overlapsPlatform =
+            info.bodyLeft < pRight &&
+            info.bodyRight > pLeft &&
+            info.bodyTop < pBottom &&
+            info.bodyBottom > pTop;
+          expect(
+            overlapsPlatform,
+            `${template.id} spawn ${i} (${spawn.kind}) body [${info.bodyLeft},${info.bodyTop},${info.bodyRight},${info.bodyBottom}] should not intersect platform [${pLeft},${pTop},${pRight},${pBottom}]`,
+          ).toBe(false);
+        }
       });
     }
   });
@@ -724,12 +763,12 @@ test.describe('Night Alley S2 Stage', () => {
     await startGame(page, SEED);
     const first = await getState(page);
     expect(first.roomIndex).toBe(0);
-    expect(first.roomCount).toBe(5);
+    expect(first.roomCount).toBe(6);
 
     await clearCurrentRoom(page);
     await advanceRoom(page, 0);
     const second = await getState(page);
     expect(second.roomIndex).toBe(1);
-    expect(second.roomCount).toBe(5);
+    expect(second.roomCount).toBe(6);
   });
 });

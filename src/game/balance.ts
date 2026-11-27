@@ -339,3 +339,57 @@ export const SIDE_DASH_COOLDOWN = 0.5;
 export const SIDE_INITIAL_ENEMIES = 5;
 export const SIDE_ENEMY_CONTACT_COOLDOWN = 1.75;
 export const SIDE_COIN_PICKUP_RADIUS = 40;
+export const SIDE_ENEMY_BODY_WIDTH = 28;
+export const SIDE_ENEMY_BODY_HEIGHT = 46;
+export const SIDE_ENEMY_BODY_OFFSET_X = 18;
+export const SIDE_ENEMY_BODY_OFFSET_Y = 8;
+
+export interface SideEnemyConfig {
+  kind: EnemyKind;
+  maxHp: number;
+  speed: number;
+  contactDamage: number;
+  attackCooldown: number;
+  coinDrops: number;
+  visualScale: number;
+  stunScale: number;
+}
+
+/** 横板 6 种敌人数值配置 (以俯视角 balance 为起点, 接触间隔统一 1.75s)。 */
+export function sideEnemyStatsForKind(kind: EnemyKind): SideEnemyConfig {
+  if (kind === 'boss') {
+    return {
+      kind,
+      maxHp: BOSS_MAX_HP,
+      speed: BOSS_SPEED,
+      contactDamage: BOSS_CONTACT_DAMAGE,
+      attackCooldown: BOSS_ATTACK_COOLDOWN,
+      coinDrops: 0,
+      visualScale: 1.6,
+      stunScale: 0.25,
+    };
+  }
+  const base = enemyStatsForKind(kind, 0);
+  if (kind === 'elite') {
+    return {
+      kind,
+      maxHp: base.maxHp, // Math.floor(8 * 4.5) = 36
+      speed: base.speed, // 55 * 0.85 = 46.75
+      contactDamage: ENEMY_CONTACT_DAMAGE,
+      attackCooldown: SIDE_ENEMY_CONTACT_COOLDOWN,
+      coinDrops: ELITE_XP_ORBS, // 3
+      visualScale: 1.25,
+      stunScale: 0.5,
+    };
+  }
+  return {
+    kind,
+    maxHp: base.maxHp,
+    speed: base.speed,
+    contactDamage: ENEMY_CONTACT_DAMAGE,
+    attackCooldown: SIDE_ENEMY_CONTACT_COOLDOWN,
+    coinDrops: 1,
+    visualScale: 1,
+    stunScale: 1,
+  };
+}

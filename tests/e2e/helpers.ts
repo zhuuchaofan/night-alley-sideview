@@ -38,24 +38,38 @@ export async function startGame(page: Page, seed?: number): Promise<void> {
   await page.waitForFunction(() => window.__SIDEVIEW_DEBUG__?.getState().scene === 'SideGameScene');
 }
 
-/** 杀光当前房间的敌人 (反复在玩家附近生成一只、挥剑两次)。零敌人房直接返回。
- * 每轮先回满血: 五间连清时站桩的玩家会被围殴致死, 回血只保 helper 走完流程。 */
+/** 杀光当前房间的敌人 (瞬移到最近敌人身旁挥剑)。零敌人房直接返回。
+ * 每轮先回满血: 六间连清时站桩的玩家会被围殴致死, 回血只保 helper 走完流程。 */
 export async function clearCurrentRoom(page: Page): Promise<void> {
-  for (let i = 0; i < 60; i += 1) {
+  for (let i = 0; i < 80; i += 1) {
     const state = await getState(page);
     if (state.roomCleared || state.stageCleared) {
       return;
     }
-    await page.evaluate(() => {
-      window.__SIDEVIEW_DEBUG__?.setHp(30);
-    });
-    await page.evaluate(() => {
-      window.__SIDEVIEW_DEBUG__?.spawnEnemyNearPlayer();
-    });
-    await page.keyboard.press('KeyJ');
-    await page.waitForTimeout(320);
-    await page.keyboard.press('KeyJ');
-    await page.waitForTimeout(320);
+    const target = state.enemyInfos?.[0];
+    if (target) {
+      await page.evaluate(
+        ({ ex, eb }) => {
+          window.__SIDEVIEW_DEBUG__?.setHp(30);
+          const px = ex > 110 ? ex - 32 : ex + 32;
+          window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(px, eb - 22);
+        },
+        { ex: target.x, eb: target.bodyBottom },
+      );
+      if (target.x <= 110) {
+        await page.keyboard.down('KeyA');
+        await page.waitForTimeout(40);
+        await page.keyboard.up('KeyA');
+      } else {
+        await page.keyboard.down('KeyD');
+        await page.waitForTimeout(40);
+        await page.keyboard.up('KeyD');
+      }
+      await page.keyboard.press('KeyJ');
+      await page.waitForTimeout(280);
+    } else {
+      await page.waitForTimeout(100);
+    }
   }
   await page.waitForFunction(
     () => {
@@ -141,9 +155,9 @@ export async function advanceRoom(page: Page, choice = 0): Promise<void> {
   await waitForRoomIndex(page, before.roomIndex + 1);
 }
 
-/** 走完全关 (5 间): 分支格按 choiceAtBranch 选; 结束时 stageCleared 为真。 */
+/** 走完全关 (6 间): 分支格按 choiceAtBranch 选; 结束时 stageCleared 为真。 */
 export async function clearStage(page: Page, choiceAtBranch = 0): Promise<void> {
-  for (let room = 0; room < 5; room += 1) {
+  for (let room = 0; room < 6; room += 1) {
     await clearCurrentRoom(page);
     const state = await getState(page);
     if (state.stageCleared) {

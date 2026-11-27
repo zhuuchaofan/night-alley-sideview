@@ -2,19 +2,21 @@ import Phaser from 'phaser';
 import {
   ARENA_HEIGHT,
   ARENA_WIDTH,
-  ENEMY_BASE_HP,
-  ENEMY_BASE_SPEED,
-  ENEMY_CONTACT_DAMAGE,
+  type EnemyKind,
   HUD_HEIGHT,
   PLAYER_MAX_HP,
   PLAYER_SPEED,
+  SHOOTER_BOLT_DAMAGE,
+  SHOOTER_BOLT_SPEED,
+  SHOOTER_FIRE_COOLDOWN,
+  SHOOTER_RANGE,
+  SHOOTER_RETREAT_DIST,
   SIDE_CHARGE_THRESHOLD,
   SIDE_COIN_PICKUP_RADIUS,
   SIDE_DASH_COOLDOWN,
   SIDE_DASH_DAMAGE,
   SIDE_DASH_DURATION,
   SIDE_DASH_SPEED,
-  SIDE_ENEMY_CONTACT_COOLDOWN,
   SIDE_GROUND_Y,
   SIDE_HEAVY_DAMAGE,
   SIDE_HEAVY_HEIGHT,
@@ -29,17 +31,20 @@ import {
   SIDE_SWING_HEIGHT,
   SIDE_SWING_WIDTH,
   SIDE_WALL_WIDTH,
+  sideEnemyStatsForKind,
 } from '../game/balance.ts';
 import { addPixelText } from '../game/pixelFont.ts';
 import { buildNightAlleyBackdrop, ensureGameTextures, PALETTE } from '../game/pixelart.ts';
 import {
   applySideKnockbackImpulse,
   canMergeSideDamageNumber,
+  compensateEnemyBodyScale,
   compensatePlayerBodyScale,
   computeSideCoinScatterOffset,
   computeSideCoinScatterVelocity,
   decaySideKnockbackOffset,
   formatSideDamageNumber,
+  rectsStrictlyOverlap,
   SIDE_AFTERIMAGE_INTERVAL_SECONDS,
   SIDE_AFTERIMAGE_LIFETIME_MS,
   SIDE_DAMAGE_NUMBER_DURATION_MS,
@@ -81,11 +86,26 @@ import { playSound } from '../game/sound.ts';
 
 interface EnemyUnit {
   id: number;
+  kind: EnemyKind;
   sprite: Phaser.Physics.Arcade.Sprite;
+  maxHp: number;
   hp: number;
+  speed: number;
+  contactDamage: number;
+  attackCooldown: number;
+  coinDrops: number;
+  baseScale: number;
+  stunScale: number;
   contactCooldown: number;
   stunTimer: number;
   flashTimer: number;
+  attackFlashTimer: number;
+  aiTimer: number;
+  lungeTimer: number;
+  windupTimer: number;
+  lungeDir: 1 | -1;
+  phase: 1 | 2;
+  frozen: boolean;
   /** Render-only knockback offset (px); the body never moves with a hit. */
   knockX: number;
   knockY: number;
@@ -98,6 +118,22 @@ interface EnemyUnit {
   appliedKnockY: number;
   /** 敌人自己的碰撞体 (地面 + 平台); 敌人销毁时显式 destroy, 不留残留。 */
   colliders: Phaser.Physics.Arcade.Collider[];
+}
+
+interface EnemyBolt {
+  sprite: Phaser.Physics.Arcade.Sprite;
+  vx: number;
+  vy: number;
+  damage: number;
+  life: number;
+}
+
+function enemyTextureKey(kind: EnemyKind): string {
+  return `enemy_${kind}`;
+}
+
+function enemyHitTextureKey(kind: EnemyKind): string {
+  return `enemy_${kind}_hit`;
 }
 
 interface CoinDrop {
@@ -139,6 +175,8 @@ export class SideGameScene extends Phaser.Scene {
   /** 可变平台组: 每间房按模板重建 (clear 时销毁成员, 含静态体)。 */
   private platforms!: Phaser.Physics.Arcade.StaticGroup;
   private enemies: EnemyUnit[] = [];
+  private enemyBolts: EnemyBolt[] = [];
+  private contactSignals: { enemyId: number; timeMs: number }[] = [];
   private coinDrops: CoinDrop[] = [];
   private damageNumbers: DamageNumberEntry[] = [];
   /** 玩家受击飘字 (spawnFloatingNumber 另起的 label + tween, 不走 damageNumbers)。 */
@@ -175,6 +213,7 @@ export class SideGameScene extends Phaser.Scene {
   private damageNumbersShown = 0;
   private burstsSpawned = 0;
   private hitstopsApplied = 0;
+  private heavyShakesApplied = 0;
 
   /** Active hitstop resume timer; replaced (not stacked) when extended. */
   private hitstopEvent?: Phaser.Time.TimerEvent;
@@ -221,6 +260,9 @@ export class SideGameScene extends Phaser.Scene {
   private coinsText!: Phaser.GameObjects.BitmapText;
   private rollHudText!: Phaser.GameObjects.BitmapText;
   private dashHudText!: Phaser.GameObjects.BitmapText;
+  private bossBarBg!: Phaser.GameObjects.Rectangle;
+  private bossBarFill!: Phaser.GameObjects.Rectangle;
+  private bossBarLabel!: Phaser.GameObjects.BitmapText;
 
   private clearGroup!: Phaser.GameObjects.Group;
   private clearCoinsText!: Phaser.GameObjects.BitmapText;
@@ -278,6 +320,8 @@ export class SideGameScene extends Phaser.Scene {
         damageNumbersShown: this.damageNumbersShown,
         burstsSpawned: this.burstsSpawned,
         hitstopsApplied: this.hitstopsApplied,
+        heavyShakesApplied: this.heavyShakesApplied,
+        timeNow: Math.round(this.time.now),
         seed: this.runSeed,
         roomIndex: this.roomIndex,
         roomType: this.currentTemplate.type,
@@ -305,11 +349,46 @@ export class SideGameScene extends Phaser.Scene {
           (this.player.body as Phaser.Physics.Arcade.Body).bottom,
         ),
         grounded: (this.player.body as Phaser.Physics.Arcade.Body).blocked.down,
+        rolling: this.rollActiveThisFrame,
+        playerBody: (() => {
+          const pb = this.player.body as Phaser.Physics.Arcade.Body;
+          return {
+            left: Math.round(pb.left),
+            right: Math.round(pb.right),
+            top: Math.round(pb.top),
+            bottom: Math.round(pb.bottom),
+          };
+        })(),
         enemyBodyBottoms: this.enemies.map((e) =>
           Math.round((e.sprite.body as Phaser.Physics.Arcade.Body).bottom),
         ),
+        enemyInfos: this.enemies.map((e) => {
+          const eb = e.sprite.body as Phaser.Physics.Arcade.Body;
+          return {
+            id: e.id,
+            kind: e.kind,
+            x: Math.round(e.sprite.x),
+            y: Math.round(e.sprite.y),
+            bodyLeft: Math.round(eb.left),
+            bodyRight: Math.round(eb.right),
+            bodyTop: Math.round(eb.top),
+            bodyBottom: Math.round(eb.bottom),
+            bodyLeftRaw: eb.left,
+            bodyRightRaw: eb.right,
+            bodyTopRaw: eb.top,
+            bodyBottomRaw: eb.bottom,
+            hp: e.hp,
+            hitFlash: e.flashTimer > 0,
+            attackFlash: e.attackFlashTimer > 0,
+            windup: e.windupTimer > 0,
+            knockX: Math.round(e.knockX),
+          };
+        }),
+        contactSignals: this.contactSignals.slice(),
+        enemyBoltsAlive: this.enemyBolts.length,
+        coinDropsAlive: this.coinDrops.length,
       }),
-      spawnEnemyNearPlayer: () => {
+      spawnEnemyNearPlayer: (kind: EnemyKind = 'paper') => {
         if (this.gameOverTriggered) {
           return;
         }
@@ -322,9 +401,35 @@ export class SideGameScene extends Phaser.Scene {
             : Phaser.Math.Clamp(this.player.x - this.facing * 38, minX, maxX);
         // 脚底锚点: 用玩家身体盒底 (body.bottom = sprite.y + 22) 作 surfaceY。
         const footY = (this.player.body as Phaser.Physics.Arcade.Body).bottom;
-        this.spawnEnemyFromFoot(spawnX, footY);
+        this.spawnEnemyFromFoot(spawnX, footY, kind);
         if (this.roomCleared) {
           // 调试重生敌人 = 房间不再清空: 收门、撤结算横幅 (S1 语义)。
+          this.roomCleared = false;
+          if (this.stageCleared) {
+            this.stageCleared = false;
+            this.clearGroup.setVisible(false);
+          }
+          this.hideDoors();
+        }
+        this.updateHud();
+      },
+      clearEnemies: () => {
+        for (const enemy of this.enemies) {
+          this.destroyEnemyUnit(enemy);
+        }
+        this.enemies = [];
+        for (const bolt of this.enemyBolts) {
+          bolt.sprite.destroy();
+        }
+        this.enemyBolts = [];
+        this.updateHud();
+      },
+      placeTestEnemy: (kind: EnemyKind, footX: number, surfaceY: number, frozen = false) => {
+        if (this.gameOverTriggered) {
+          return;
+        }
+        this.spawnEnemyFromFoot(footX, surfaceY, kind, frozen);
+        if (this.roomCleared) {
           this.roomCleared = false;
           if (this.stageCleared) {
             this.stageCleared = false;
@@ -388,6 +493,8 @@ export class SideGameScene extends Phaser.Scene {
 
   private resetState(): void {
     this.enemies = [];
+    this.enemyBolts = [];
+    this.contactSignals = [];
     this.coinDrops = [];
     this.damageNumbers = [];
     this.nextEnemyId = 1;
@@ -408,6 +515,7 @@ export class SideGameScene extends Phaser.Scene {
     this.damageNumbersShown = 0;
     this.burstsSpawned = 0;
     this.hitstopsApplied = 0;
+    this.heavyShakesApplied = 0;
     this.hitstopEvent = undefined;
     this.afterimageTimer = 0;
     this.speedLineTimer = 0;
@@ -494,6 +602,24 @@ export class SideGameScene extends Phaser.Scene {
     this.coinsText = addPixelText(this, 400, 22, '', { size: 24, color: PALETTE.lanternYellow, origin: [0, 0.5] }).setDepth(21);
     this.rollHudText = addPixelText(this, 520, 22, '', { size: 24, color: PALETTE.silverBlue, origin: [0, 0.5] }).setDepth(21);
     this.dashHudText = addPixelText(this, 660, 22, '', { size: 24, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
+
+    this.bossBarBg = this.add
+      .rectangle(ARENA_WIDTH / 2, HUD_HEIGHT + 22, 320, 12, 0x17120c, 0.9)
+      .setStrokeStyle(2, 0xc9973f)
+      .setDepth(21)
+      .setVisible(false);
+    this.bossBarFill = this.add
+      .rectangle(ARENA_WIDTH / 2 - 156, HUD_HEIGHT + 22, 312, 8, 0xb03a2e)
+      .setOrigin(0, 0.5)
+      .setDepth(22)
+      .setVisible(false);
+    this.bossBarLabel = addPixelText(this, ARENA_WIDTH / 2, HUD_HEIGHT + 38, '大心魔', {
+      size: 12,
+      color: PALETTE.paperWhite,
+      origin: 0.5,
+    })
+      .setDepth(22)
+      .setVisible(false);
   }
 
   private createClearBanner(): void {
@@ -630,13 +756,27 @@ export class SideGameScene extends Phaser.Scene {
 
   /**
    * 按脚底锚点生成敌人: sprite.x = footX, sprite.y = surfaceY - 22
-   * (身体盒 28x46、offset (18,8) → 盒底 = sprite.y + 22, 正好落在 surfaceY 上)。
+   * (经 setEnemyVisualScale 补偿后, 无论缩放多少, 物理盒恒为 28x46、盒底 = sprite.y + 22 = surfaceY)。
    */
-  private spawnEnemyFromFoot(footX: number, surfaceY: number): void {
-    const sprite = this.physics.add.sprite(footX, surfaceY - 22, 'enemy_paper').setDepth(7);
+  private spawnEnemyFromFoot(
+    footX: number,
+    surfaceY: number,
+    kind: EnemyKind = 'paper',
+    frozen = false,
+  ): void {
+    const cfg = sideEnemyStatsForKind(kind);
+    const sprite = this.physics.add
+      .sprite(footX, surfaceY - 22, enemyTextureKey(kind))
+      .setDepth(kind === 'boss' ? 8 : 7);
     sprite.setCollideWorldBounds(true);
     const body = sprite.body as Phaser.Physics.Arcade.Body;
-    body.setSize(28, 46).setOffset(18, 8);
+    this.setEnemyVisualScale(sprite, cfg.visualScale);
+    if (frozen) {
+      body.setImmovable(true);
+      // 冻结怪是定点测试靶: 不参与重力, 否则 immovable 身体无法被地面碰撞
+      // 推回、会穿地掉到世界下边界。
+      body.setAllowGravity(false);
+    }
     // setOffset 只改偏移量、不立即同步身体位置: 这里显式同步, 让 body.bottom
     // 在生成当刻就对齐 surfaceY, 不依赖下一物理步的纠正。
     body.updateFromGameObject();
@@ -647,11 +787,26 @@ export class SideGameScene extends Phaser.Scene {
 
     this.enemies.push({
       id: this.nextEnemyId++,
+      kind,
       sprite,
-      hp: ENEMY_BASE_HP,
+      maxHp: cfg.maxHp,
+      hp: cfg.maxHp,
+      speed: cfg.speed,
+      contactDamage: cfg.contactDamage,
+      attackCooldown: cfg.attackCooldown,
+      coinDrops: cfg.coinDrops,
+      baseScale: cfg.visualScale,
+      stunScale: cfg.stunScale,
       contactCooldown: 0,
       stunTimer: 0,
       flashTimer: 0,
+      attackFlashTimer: 0,
+      aiTimer: kind === 'shooter' ? SHOOTER_FIRE_COOLDOWN * 0.6 : kind === 'boss' ? 2.0 : 1.2,
+      lungeTimer: 0,
+      windupTimer: 0,
+      lungeDir: -1,
+      phase: 1,
+      frozen,
       knockX: 0,
       knockY: 0,
       appliedKnockX: 0,
@@ -704,7 +859,7 @@ export class SideGameScene extends Phaser.Scene {
 
     this.resetPlayerForRoom();
     for (const s of template.spawns) {
-      this.spawnEnemyFromFoot(s.footX, s.surfaceY);
+      this.spawnEnemyFromFoot(s.footX, s.surfaceY, s.kind);
     }
 
     // 模板带的铜钱 (宝箱房) 按现有掉落生命周期生成: 走近即拾取, 换房时未拾取的销毁。
@@ -739,6 +894,9 @@ export class SideGameScene extends Phaser.Scene {
       this.destroyEnemyUnit(enemy);
     }
     this.enemies = [];
+
+    this.clearEnemyBolts();
+    this.contactSignals = [];
 
     for (const drop of this.coinDrops) {
       drop.sprite.destroy();
@@ -858,6 +1016,7 @@ export class SideGameScene extends Phaser.Scene {
     playSound('levelUp');
     if (this.roomIndex === this.chain.slots.length - 1) {
       this.stageCleared = true;
+      this.clearEnemyBolts();
       this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
       this.clearGroup.setVisible(true);
     } else {
@@ -1052,6 +1211,7 @@ export class SideGameScene extends Phaser.Scene {
         // inside killEnemy, and Phaser drops a shake request while one is
         // running unless force is true.
         this.cameras.main.shake(110, 0.008, true);
+        this.heavyShakesApplied += 1;
       }
     }
   }
@@ -1086,9 +1246,9 @@ export class SideGameScene extends Phaser.Scene {
     stunDuration: number,
   ): void {
     enemy.hp -= damage;
-    enemy.stunTimer = stunDuration;
+    enemy.stunTimer = stunDuration * enemy.stunScale;
     enemy.flashTimer = SIDE_HIT_FLASH_SECONDS;
-    enemy.sprite.setTexture('enemy_paper_hit');
+    enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
 
     // Knockback is render-only: the body freezes in place for the stun
     // (velocity zeroed) and only the visual offset moves, decaying back.
@@ -1108,7 +1268,8 @@ export class SideGameScene extends Phaser.Scene {
   private killEnemy(enemy: EnemyUnit, index: number): void {
     const body = enemy.sprite.body as Phaser.Physics.Arcade.Body;
     const ex = body.center.x;
-    const ey = body.center.y;
+    const ey = Math.min(body.center.y, SIDE_GROUND_Y - 18);
+    const dropCount = enemy.coinDrops;
     this.destroyEnemyUnit(enemy);
     this.enemies.splice(index, 1);
 
@@ -1116,7 +1277,10 @@ export class SideGameScene extends Phaser.Scene {
     playSound('kill');
     this.cameras.main.shake(SIDE_KILL_SHAKE_MS, SIDE_KILL_SHAKE_INTENSITY);
     this.spawnDeathBurst(ex, ey);
-    this.spawnCoinDrop(ex, ey);
+    for (let i = 0; i < dropCount; i += 1) {
+      const offsetX = dropCount > 1 ? (i - (dropCount - 1) / 2) * 14 : 0;
+      this.spawnCoinDrop(ex + offsetX, ey);
+    }
 
     if (this.enemies.length === 0 && !this.roomCleared) {
       this.markRoomCleared();
@@ -1315,6 +1479,19 @@ export class SideGameScene extends Phaser.Scene {
     this.dashHudText.setText(
       this.dashCooldown <= 0 ? '疾攻 可用' : `疾攻 ${this.dashCooldown.toFixed(1)}s`,
     );
+    const boss = this.enemies.find((e) => e.kind === 'boss');
+    if (boss) {
+      const ratio = Math.max(0, Math.min(1, boss.hp / boss.maxHp));
+      this.bossBarBg.setVisible(true);
+      this.bossBarFill.setSize(Math.max(0, Math.round(312 * ratio)), 8).setVisible(true);
+      this.bossBarLabel
+        .setText(boss.phase === 2 ? '大心魔 · 狂暴' : '大心魔')
+        .setVisible(true);
+    } else {
+      this.bossBarBg.setVisible(false);
+      this.bossBarFill.setVisible(false);
+      this.bossBarLabel.setVisible(false);
+    }
     if (this.roomCleared) {
       this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
     }
@@ -1530,6 +1707,7 @@ export class SideGameScene extends Phaser.Scene {
     this.updateDamageNumbers(dt);
     this.updatePlayerTexture(moveInput !== 0 && body.blocked.down, dt);
     this.updateEnemies(dt);
+    this.updateEnemyBolts(dt);
     this.updateCoinDrops(dt);
     this.updateHud();
   }
@@ -1614,37 +1792,352 @@ export class SideGameScene extends Phaser.Scene {
 
       if (enemy.flashTimer > 0) {
         enemy.flashTimer = Math.max(0, enemy.flashTimer - dt);
-        if (enemy.flashTimer === 0) {
-          enemy.sprite.setTexture('enemy_paper');
-        }
+      }
+      if (enemy.attackFlashTimer > 0) {
+        enemy.attackFlashTimer = Math.max(0, enemy.attackFlashTimer - dt);
       }
 
       const eBody = enemy.sprite.body as Phaser.Physics.Arcade.Body;
-      if (enemy.stunTimer > 0) {
+      const dx = this.player.x - enemy.sprite.x;
+      const dy = this.player.y - enemy.sprite.y;
+      const dir = Math.abs(dx) < 6 ? 0 : dx > 0 ? 1 : -1;
+
+      if (enemy.frozen) {
+        eBody.setVelocityX(0);
+      } else if (enemy.stunTimer > 0) {
         enemy.stunTimer = Math.max(0, enemy.stunTimer - dt);
         if (enemy.stunTimer === 0) {
           eBody.setVelocityX(0);
         }
       } else {
-        const dx = this.player.x - enemy.sprite.x;
-        const dir = Math.abs(dx) < 6 ? 0 : dx > 0 ? 1 : -1;
-        eBody.setVelocityX(dir * ENEMY_BASE_SPEED);
-        if (dir !== 0) {
-          enemy.sprite.setFlipX(dir < 0);
+        this.updateEnemyAi(enemy, eBody, dx, dy, dir, dt);
+      }
+
+      // 纹理与缩放恢复 (受击闪白 / 攻击闪光 / 蓄力前摇共用)
+      if (enemy.flashTimer > 0 || enemy.attackFlashTimer > 0 || enemy.windupTimer > 0) {
+        enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+      } else {
+        enemy.sprite.setTexture(enemyTextureKey(enemy.kind));
+        if (Math.abs(enemy.sprite.scaleX - enemy.baseScale) > 0.001) {
+          this.setEnemyVisualScale(enemy.sprite, enemy.baseScale);
         }
       }
 
       if (
         !invulnerable &&
         enemy.contactCooldown <= 0 &&
-        Phaser.Geom.Intersects.RectangleToRectangle(pBounds, this.bodyBounds(enemy.sprite))
+        rectsStrictlyOverlap(pBounds, this.bodyBounds(enemy.sprite))
       ) {
-        enemy.contactCooldown = SIDE_ENEMY_CONTACT_COOLDOWN;
-        this.applyPlayerDamage(ENEMY_CONTACT_DAMAGE);
+        enemy.contactCooldown = enemy.attackCooldown;
+        enemy.attackFlashTimer = 0.18;
+        enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+        this.setEnemyVisualScale(enemy.sprite, enemy.baseScale * 1.18);
+        this.spawnContactAttackSpark(
+          (this.player.x + eBody.center.x) / 2,
+          (this.player.y + eBody.center.y) / 2,
+        );
+        this.contactSignals.push({ enemyId: enemy.id, timeMs: Math.round(this.time.now) });
+        if (this.contactSignals.length > 32) {
+          this.contactSignals.shift();
+        }
+        this.applyPlayerDamage(enemy.contactDamage);
         if (this.gameOverTriggered) {
           return;
         }
       }
+    }
+
+    this.applyEnemySeparation();
+  }
+
+  /** 怪与怪水平分离: 同高度层敌人不许叠团遮挡, 硬直/冻结怪保持定身不参与分离。 */
+  private applyEnemySeparation(): void {
+    const minWallX = SIDE_WALL_WIDTH + 16;
+    const maxWallX = ARENA_WIDTH - SIDE_WALL_WIDTH - 16;
+    for (let pass = 0; pass < 4; pass += 1) {
+      let moved = false;
+      for (let i = 0; i < this.enemies.length; i += 1) {
+        const a = this.enemies[i];
+        const aPinned = a.frozen || a.stunTimer > 0;
+        const ba = a.sprite.body as Phaser.Physics.Arcade.Body;
+        for (let j = i + 1; j < this.enemies.length; j += 1) {
+          const b = this.enemies[j];
+          const bPinned = b.frozen || b.stunTimer > 0;
+          if (aPinned && bPinned) {
+            continue;
+          }
+          const bb = b.sprite.body as Phaser.Physics.Arcade.Body;
+          // 垂直方向用实际盒边判断是否真正相交 (不固定 40): 两个 46 高的盒子
+          // 中心高差 40–46px 时仍重叠, 旧阈值会漏掉。
+          if (ba.bottom <= bb.top || bb.bottom <= ba.top) {
+            continue;
+          }
+          const minSep = (ba.width + bb.width) * 0.5;
+          const dx = ba.center.x - bb.center.x;
+          const absDx = Math.abs(dx);
+          if (absDx >= minSep) {
+            continue;
+          }
+          const overlap = minSep - absDx;
+          const pushDir = dx === 0 ? (a.id < b.id ? -1 : 1) : dx > 0 ? 1 : -1;
+          const prevAx = a.sprite.x;
+          const prevBx = b.sprite.x;
+
+          if (aPinned) {
+            b.sprite.x = Phaser.Math.Clamp(b.sprite.x - pushDir * overlap, minWallX, maxWallX);
+            bb.updateFromGameObject();
+            // 墙夹角: 单侧位移被墙截断、仍重叠时, 试另一侧 (硬直怪保持原位)。
+            if (Math.abs(ba.center.x - bb.center.x) < minSep) {
+              const otherSideX = Phaser.Math.Clamp(
+                ba.center.x + pushDir * minSep,
+                minWallX,
+                maxWallX,
+              );
+              if (Math.abs(otherSideX - ba.center.x) >= minSep) {
+                b.sprite.x = otherSideX;
+                bb.updateFromGameObject();
+              }
+            }
+          } else if (bPinned) {
+            a.sprite.x = Phaser.Math.Clamp(a.sprite.x + pushDir * overlap, minWallX, maxWallX);
+            ba.updateFromGameObject();
+            if (Math.abs(ba.center.x - bb.center.x) < minSep) {
+              const otherSideX = Phaser.Math.Clamp(
+                bb.center.x - pushDir * minSep,
+                minWallX,
+                maxWallX,
+              );
+              if (Math.abs(otherSideX - bb.center.x) >= minSep) {
+                a.sprite.x = otherSideX;
+                ba.updateFromGameObject();
+              }
+            }
+          } else {
+            const half = overlap * 0.5;
+            a.sprite.x = Phaser.Math.Clamp(prevAx + pushDir * half, minWallX, maxWallX);
+            b.sprite.x = Phaser.Math.Clamp(prevBx - pushDir * half, minWallX, maxWallX);
+            // 靠墙截断时把未推开的余量让位给另一侧, 防止贴墙长期重叠。
+            const movedA = Math.abs(a.sprite.x - prevAx);
+            const movedB = Math.abs(b.sprite.x - prevBx);
+            const rem = overlap - movedA - movedB;
+            if (rem > 0.01) {
+              if (movedA < half - 0.01) {
+                b.sprite.x = Phaser.Math.Clamp(b.sprite.x - pushDir * rem, minWallX, maxWallX);
+              } else if (movedB < half - 0.01) {
+                a.sprite.x = Phaser.Math.Clamp(a.sprite.x + pushDir * rem, minWallX, maxWallX);
+              }
+            }
+          }
+
+          ba.updateFromGameObject();
+          bb.updateFromGameObject();
+          if (pass === 0) {
+            // 按实际位移方向加分离加速度: 越过硬直怪到另一侧时, 速度方向跟着走。
+            if (!aPinned) {
+              const dirA = Math.sign(a.sprite.x - prevAx) || pushDir;
+              ba.setVelocityX(ba.velocity.x + dirA * 65);
+            }
+            if (!bPinned) {
+              const dirB = Math.sign(b.sprite.x - prevBx) || -pushDir;
+              bb.setVelocityX(bb.velocity.x + dirB * 65);
+            }
+          }
+          moved = true;
+        }
+      }
+      if (!moved) {
+        break;
+      }
+    }
+  }
+
+  private updateEnemyAi(
+    enemy: EnemyUnit,
+    eBody: Phaser.Physics.Arcade.Body,
+    dx: number,
+    dy: number,
+    dir: number,
+    dt: number,
+  ): void {
+    const faceDir = dx >= 0 ? 1 : -1;
+    if (enemy.kind === 'swift') {
+      enemy.aiTimer = Math.max(0, enemy.aiTimer - dt);
+      if (enemy.lungeTimer > 0) {
+        enemy.lungeTimer = Math.max(0, enemy.lungeTimer - dt);
+        eBody.setVelocityX(enemy.lungeDir * enemy.speed * 2.2);
+        enemy.sprite.setFlipX(enemy.lungeDir < 0);
+        return;
+      }
+      if (enemy.windupTimer > 0) {
+        enemy.windupTimer = Math.max(0, enemy.windupTimer - dt);
+        eBody.setVelocityX(0);
+        enemy.sprite.setFlipX(faceDir < 0);
+        if (enemy.windupTimer === 0) {
+          enemy.lungeTimer = 0.28;
+          enemy.aiTimer = 2.2;
+          enemy.lungeDir = faceDir;
+        }
+        return;
+      }
+      if (Math.abs(dx) < 180 && Math.abs(dy) < 48 && enemy.aiTimer <= 0) {
+        enemy.windupTimer = 0.25;
+        eBody.setVelocityX(0);
+        return;
+      }
+      eBody.setVelocityX(dir * enemy.speed);
+      if (dir !== 0) {
+        enemy.sprite.setFlipX(dir < 0);
+      }
+      return;
+    }
+
+    if (enemy.kind === 'shooter') {
+      enemy.aiTimer = Math.max(0, enemy.aiTimer - dt);
+      const dist = Math.abs(dx);
+      if (dist > SHOOTER_RANGE) {
+        eBody.setVelocityX(faceDir * enemy.speed);
+      } else if (dist < SHOOTER_RETREAT_DIST) {
+        eBody.setVelocityX(-faceDir * enemy.speed);
+      } else {
+        eBody.setVelocityX(0);
+      }
+      enemy.sprite.setFlipX(faceDir < 0);
+
+      if (enemy.aiTimer <= 0 && dist <= SHOOTER_RANGE + 80) {
+        enemy.aiTimer = SHOOTER_FIRE_COOLDOWN;
+        enemy.attackFlashTimer = 0.14;
+        const angle = Math.atan2(this.player.y - eBody.center.y, this.player.x - eBody.center.x);
+        this.spawnEnemyBolt(
+          eBody.center.x,
+          eBody.center.y,
+          Math.cos(angle) * SHOOTER_BOLT_SPEED,
+          Math.sin(angle) * SHOOTER_BOLT_SPEED,
+          SHOOTER_BOLT_DAMAGE,
+        );
+      }
+      return;
+    }
+
+    if (enemy.kind === 'boss') {
+      if (enemy.phase === 1 && enemy.hp <= enemy.maxHp * 0.5) {
+        enemy.phase = 2;
+        this.spawnFloatingNumber(eBody.center.x, eBody.center.y - 38, '狂暴', PALETTE.vermilion);
+        this.cameras.main.shake(100, 0.006, true);
+      }
+      enemy.aiTimer = Math.max(0, enemy.aiTimer - dt);
+      const moveSpeed = enemy.phase === 2 ? enemy.speed * 1.15 : enemy.speed;
+
+      if (enemy.lungeTimer > 0) {
+        enemy.lungeTimer = Math.max(0, enemy.lungeTimer - dt);
+        eBody.setVelocityX(enemy.lungeDir * moveSpeed * 1.85);
+        enemy.sprite.setFlipX(enemy.lungeDir < 0);
+        return;
+      }
+      if (enemy.windupTimer > 0) {
+        enemy.windupTimer = Math.max(0, enemy.windupTimer - dt);
+        eBody.setVelocityX(0);
+        enemy.sprite.setFlipX(faceDir < 0);
+        if (enemy.windupTimer === 0) {
+          if (Math.abs(dx) > 140 || (enemy.phase === 2 && Math.abs(dx) > 100)) {
+            const baseAngle = Math.atan2(
+              this.player.y - eBody.center.y,
+              this.player.x - eBody.center.x,
+            );
+            const offsets = enemy.phase === 2 ? [-0.22, 0, 0.22] : [0];
+            for (const off of offsets) {
+              const a = baseAngle + off;
+              this.spawnEnemyBolt(
+                eBody.center.x,
+                eBody.center.y,
+                Math.cos(a) * (SHOOTER_BOLT_SPEED * 1.2),
+                Math.sin(a) * (SHOOTER_BOLT_SPEED * 1.2),
+                1,
+              );
+            }
+          } else {
+            enemy.lungeTimer = 0.35;
+            enemy.lungeDir = faceDir;
+          }
+          enemy.aiTimer = enemy.phase === 2 ? 2.4 : 3.2;
+        }
+        return;
+      }
+      if (enemy.aiTimer <= 0) {
+        enemy.windupTimer = 0.4;
+        eBody.setVelocityX(0);
+        return;
+      }
+      eBody.setVelocityX(dir * moveSpeed);
+      if (dir !== 0) {
+        enemy.sprite.setFlipX(dir < 0);
+      }
+      return;
+    }
+
+    // paper, lantern, elite: 稳定追击玩家
+    eBody.setVelocityX(dir * enemy.speed);
+    if (dir !== 0) {
+      enemy.sprite.setFlipX(dir < 0);
+    }
+  }
+
+  private spawnEnemyBolt(x: number, y: number, vx: number, vy: number, damage: number): void {
+    const sprite = this.physics.add.sprite(x, y, 'enemy_bolt').setDepth(9);
+    const body = sprite.body as Phaser.Physics.Arcade.Body;
+    body.setAllowGravity(false);
+    body.setSize(12, 12).setOffset(26, 26);
+    body.setVelocity(vx, vy);
+    this.enemyBolts.push({ sprite, vx, vy, damage, life: 4.5 });
+  }
+
+  private updateEnemyBolts(dt: number): void {
+    if (this.stageCleared || this.gameOverTriggered) {
+      return;
+    }
+    const pBounds = this.bodyBounds(this.player);
+    for (let i = this.enemyBolts.length - 1; i >= 0; i -= 1) {
+      const bolt = this.enemyBolts[i];
+      bolt.life -= dt;
+      const sx = bolt.sprite.x;
+      const sy = bolt.sprite.y;
+      if (
+        bolt.life <= 0 ||
+        sx < SIDE_WALL_WIDTH ||
+        sx > ARENA_WIDTH - SIDE_WALL_WIDTH ||
+        sy < HUD_HEIGHT ||
+        sy > SIDE_GROUND_Y
+      ) {
+        bolt.sprite.destroy();
+        this.enemyBolts.splice(i, 1);
+        continue;
+      }
+      if (
+        !this.rollActiveThisFrame &&
+        Phaser.Geom.Intersects.RectangleToRectangle(pBounds, this.bodyBounds(bolt.sprite))
+      ) {
+        const dmg = bolt.damage;
+        bolt.sprite.destroy();
+        this.enemyBolts.splice(i, 1);
+        this.applyPlayerDamage(dmg);
+        if (this.gameOverTriggered) {
+          return;
+        }
+      }
+    }
+  }
+
+  private spawnContactAttackSpark(x: number, y: number): void {
+    for (let i = 0; i < 4; i += 1) {
+      const angle = (Math.PI * 2 * i) / 4 + Math.PI / 4;
+      const p = this.add.rectangle(x, y, 4, 4, 0xb03a2e).setDepth(14);
+      this.tweens.add({
+        targets: p,
+        x: x + Math.cos(angle) * 14,
+        y: y + Math.sin(angle) * 14,
+        alpha: 0,
+        duration: 160,
+        onComplete: () => p.destroy(),
+      });
     }
   }
 
@@ -1757,6 +2250,23 @@ export class SideGameScene extends Phaser.Scene {
     body.setSize(comp.width, comp.height);
     body.setOffset(comp.offsetX, comp.offsetY);
     body.updateBounds();
+  }
+
+  /** 缩放敌人显示但保持物理盒恒为 28x46 (精英/Boss/命中闪不放大碰撞盒)。 */
+  private setEnemyVisualScale(sprite: Phaser.Physics.Arcade.Sprite, scale: number): void {
+    sprite.setScale(scale);
+    const body = sprite.body as Phaser.Physics.Arcade.Body;
+    const comp = compensateEnemyBodyScale(scale);
+    body.setSize(comp.width, comp.height);
+    body.setOffset(comp.offsetX, comp.offsetY);
+    body.updateBounds();
+  }
+
+  private clearEnemyBolts(): void {
+    for (const bolt of this.enemyBolts) {
+      bolt.sprite.destroy();
+    }
+    this.enemyBolts = [];
   }
 
   private spawnAfterimage(alpha: number, stretchX: number): void {

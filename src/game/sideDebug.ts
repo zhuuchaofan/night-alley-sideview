@@ -1,5 +1,6 @@
 import { isBgmStarted } from './bgm.ts';
 import { getSoundState } from './sound.ts';
+import type { EnemyKind } from './balance.ts';
 import type { RoomType } from './rooms.ts';
 
 export interface DoorDebugInfo {
@@ -22,6 +23,10 @@ export interface SideviewDebugState {
   damageNumbersShown: number;
   burstsSpawned: number;
   hitstopsApplied: number;
+  /** 重击触发的相机震屏次数 (SideGameScene only; other scenes report 0). */
+  heavyShakesApplied: number;
+  /** 场景时钟 ms (与 contactSignals.timeMs 同一时钟, 供掉血配对用)。 */
+  timeNow: number;
   /** S2 stage state (SideGameScene; other scenes report defaults). */
   seed: number;
   roomIndex: number;
@@ -49,32 +54,75 @@ export interface SideviewDebugState {
   /** 玩家身体盒底 y 与是否着地 (走跳/生成点验收用)。 */
   bodyBottom: number;
   grounded: boolean;
+  /** 玩家是否处于翻滚免伤状态 (rollTimer > 0 或刚结束的宽限帧)。 */
+  rolling: boolean;
+  /** 玩家物理盒四边 (接触/贴边验收用)。 */
+  playerBody?: {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+  };
   /** 每个敌人的身体盒底 y, 与模板 spawns 顺序一致。 */
   enemyBodyBottoms: number[];
+  /** 每个敌人的位置、种类、包围盒四边、HP 与表现状态 (接触/分离/多怪验收用)。
+   * body* 为取整值 (既有用例断言精确像素); body*Raw 为未取整的实际盒边,
+   * 供分离验收用实际半宽之和判定重叠。 */
+  enemyInfos?: {
+    id: number;
+    kind: EnemyKind;
+    x: number;
+    y: number;
+    bodyLeft: number;
+    bodyRight: number;
+    bodyTop: number;
+    bodyBottom: number;
+    bodyLeftRaw: number;
+    bodyRightRaw: number;
+    bodyTopRaw: number;
+    bodyBottomRaw: number;
+    hp: number;
+    hitFlash?: boolean;
+    attackFlash?: boolean;
+    windup?: boolean;
+    knockX?: number;
+  }[];
+  /** 最近接触攻击信号 (攻击者 id 与场景时间 ms, 供可读性验收对应掉血)。 */
+  contactSignals?: { enemyId: number; timeMs: number }[];
+  /** 场上敌方射弹数。 */
+  enemyBoltsAlive?: number;
+  /** 场上未拾取的铜钱数。 */
+  coinDropsAlive?: number;
 }
 
 export type SceneSideviewDebugState = Omit<SideviewDebugState, 'soundMuted' | 'bgmStarted'>;
 
 export interface SideviewDebugHook {
   getState(): SideviewDebugState;
-  spawnEnemyNearPlayer(): void;
+  spawnEnemyNearPlayer(kind?: EnemyKind): void;
   setHp(hp: number): void;
   setSeed(seed: number): void;
   /** 测试专用: 直接进指定模板的房间 (走跳验收用), 不走选门流程。 */
   enterTemplate?(templateId: string): void;
   /** 测试专用: 把玩家传送到指定位置 (走跳验收用)。 */
   teleportPlayer?(x: number, y: number): void;
+  /** 测试专用: 清空场上敌人 (接触距离回归测试用)。 */
+  clearEnemies?(): void;
+  /** 测试专用: 在指定位置生成/定住测试敌人 (接触距离回归测试用)。 */
+  placeTestEnemy?(kind: EnemyKind, footX: number, surfaceY: number, frozen?: boolean): void;
   /** 测试专用: 对当前活动指针做一次 hitTest, 返回指针游戏坐标与命中对象。 */
   probeHit?(): { px: number; py: number; over: string[]; listSize: number };
 }
 
 export interface SceneSideviewDebugHook {
   getState(): SceneSideviewDebugState;
-  spawnEnemyNearPlayer(): void;
+  spawnEnemyNearPlayer(kind?: EnemyKind): void;
   setHp(hp: number): void;
   setSeed(seed: number): void;
   enterTemplate?(templateId: string): void;
   teleportPlayer?(x: number, y: number): void;
+  clearEnemies?(): void;
+  placeTestEnemy?(kind: EnemyKind, footX: number, surfaceY: number, frozen?: boolean): void;
   probeHit?(): { px: number; py: number; over: string[]; listSize: number };
 }
 
