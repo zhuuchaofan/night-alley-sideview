@@ -10,6 +10,8 @@ describe('pixel font coverage for S2 labels', () => {
       ...ROOM_TEMPLATES.map((t) => t.label),
       '继续前进',
       '柜台',
+      '大心魔 · 狂暴',
+      '狂暴',
       // 房间横幅按实际骨架枚举全部房号 (夜巷 i/5), 不只抽查 1/5。
       ...[1, 2, 3, 4, 5].map((i) => `夜巷 ${i}/5 · 入口 · 夜巷`),
       'R 重试本局 · Esc 返回标题',

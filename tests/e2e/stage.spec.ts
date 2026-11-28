@@ -259,6 +259,30 @@ test.describe('Night Alley S2 Stage', () => {
     expect(after.chainSignature).toBe(expected.replace(':null', ':1'));
   });
 
+  test('standing in the gap between the two branch doors triggers neither', async ({
+    page,
+  }) => {
+    test.setTimeout(120000);
+    await startGame(page, SEED);
+
+    await clearCurrentRoom(page);
+    await advanceRoom(page, 0);
+    await clearCurrentRoom(page);
+    const before = await getState(page);
+    expect(before.doors).toHaveLength(2);
+    const attemptsBefore = before.doorSubmitAttempts;
+
+    // 两门触发区 [710,770]/[800,860] 之间的中立间隙: 传送到 x=785 (身体
+    // [771,799] 两边都不沾), 站 500ms, 哪扇门都不该触发、提交计数不变。
+    await page.evaluate(() => {
+      window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(785, 478);
+    });
+    await page.waitForTimeout(500);
+    const standing = await getState(page);
+    expect(standing.roomIndex).toBe(1);
+    expect(standing.doorSubmitAttempts).toBe(attemptsBefore);
+  });
+
   test('clicking a door on its first visible frame still submits', async ({
     page,
   }) => {

@@ -518,6 +518,55 @@ test.describe('Night Alley S2 Slice (b): Contact, Separation & 6 Enemy Kinds', (
     expect(sawTripleVolley).toBe(true);
   });
 
+  test('boss phase 2 label reads 大心魔 · 狂暴 in the debug state', async ({ page }) => {
+    test.setTimeout(120000);
+    await startGame(page, 1006);
+    // bossBarLabel/bossPhase 是 sideDebug getState 的只读新增字段
+    // (SideGameScene 展开拼入, 未改 sideDebug.ts 接口): 这里经 unknown 转读。
+    const getBossBarLabel = async (): Promise<string | undefined> =>
+      page.evaluate(
+        () =>
+          (
+            window.__SIDEVIEW_DEBUG__?.getState() as unknown as {
+              bossBarLabel?: string;
+            }
+          )?.bossBarLabel,
+      );
+
+    await page.evaluate(() => {
+      window.__SIDEVIEW_DEBUG__?.enterTemplate?.('boss-1');
+    });
+    const bossInit = await getState(page);
+    expect(bossInit.roomType).toBe('boss');
+    expect(bossInit.enemyInfos?.[0].kind).toBe('boss');
+    expect(bossInit.enemyInfos?.[0].hp).toBe(120);
+    expect(await getBossBarLabel()).toBe('大心魔');
+
+    // 重击 (12 伤) 把 Boss 打到 50% 以下 (≤60): 与既有 Boss 阶段 2 用例同一打法。
+    for (let i = 0; i < 8; i += 1) {
+      await page.evaluate(() => {
+        const b = window.__SIDEVIEW_DEBUG__?.getState().enemyInfos?.[0];
+        if (b) {
+          window.__SIDEVIEW_DEBUG__?.setHp(30);
+          window.__SIDEVIEW_DEBUG__?.teleportPlayer?.(b.x - 32, b.bodyBottom - 22);
+        }
+      });
+      await page.keyboard.down('KeyD');
+      await page.waitForTimeout(30);
+      await page.keyboard.up('KeyD');
+      await page.keyboard.down('KeyJ');
+      await page.waitForTimeout(520);
+      await page.keyboard.up('KeyJ');
+      await page.waitForTimeout(340);
+      const cur = await getState(page);
+      if ((cur.enemyInfos?.[0]?.hp ?? 120) <= 60) {
+        break;
+      }
+    }
+    expect((await getState(page)).enemyInfos?.[0]?.hp ?? 120).toBeLessThanOrEqual(60);
+    expect(await getBossBarLabel()).toBe('大心魔 · 狂暴');
+  });
+
   test('B4: boss death clears in-flight bolts so low-HP player stays stageCleared', async ({
     page,
   }) => {

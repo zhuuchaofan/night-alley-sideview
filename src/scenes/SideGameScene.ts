@@ -37,7 +37,7 @@ import {
   sideEnemyStatsForKind,
 } from '../game/balance.ts';
 import { addPixelText } from '../game/pixelFont.ts';
-import { buildNightAlleyBackdrop, ensureGameTextures, PALETTE } from '../game/pixelart.ts';
+import { buildNightAlleyBackdrop, computePlatformTileLayout, ensureGameTextures, PALETTE } from '../game/pixelart.ts';
 import {
   applySideKnockbackImpulse,
   canMergeSideDamageNumber,
@@ -108,6 +108,8 @@ interface EnemyUnit {
   aiTimer: number;
   lungeTimer: number;
   windupTimer: number;
+  /** Boss 发弹帧计时 (纯视觉, updateEnemies 里递减; 仅 Boss 置位)。 */
+  boltTimer: number;
   lungeDir: 1 | -1;
   phase: 1 | 2;
   frozen: boolean;
@@ -166,6 +168,8 @@ interface Door {
   label: string;
   zone: Phaser.GameObjects.Zone;
   bg: Phaser.GameObjects.Rectangle;
+  /** 门板像素图 (64×96, 居中盖在门区上; hideDoors 里销毁)。 */
+  img: Phaser.GameObjects.Image;
   labelText: Phaser.GameObjects.BitmapText;
   bounds: Phaser.Geom.Rectangle;
   overlap: Phaser.Physics.Arcade.Collider;
@@ -235,10 +239,13 @@ export class SideGameScene extends Phaser.Scene {
 
   private facing: 1 | -1 = 1;
   private walkTimer = 0;
-  private walkFrame = false;
+  private walkFrameIndex = 0;
 
   private swingCooldown = 0;
   private swingVisualTimer = 0;
+  /** 本次挥剑是否重击 + 挥剑视觉总时长 (performSwordStrike 记, updatePlayerTexture 按已流逝时间分三段)。 */
+  private swingHeavy = false;
+  private swingVisualTotal = 0;
   private jHeld = false;
   private jHoldStartMs = 0;
 
@@ -303,6 +310,7 @@ export class SideGameScene extends Phaser.Scene {
     );
 
     this.createArenaBase();
+    this.createForeground();
     this.createPlayer();
     this.createHud();
     this.createClearBanner();
@@ -317,8 +325,17 @@ export class SideGameScene extends Phaser.Scene {
     this.updateHud();
 
     registerSideDebugHook({
-      getState: () => ({
-        scene: 'SideGameScene',
+      getState: () => {
+        // Boss 调试字段 (只读新增): bossBarLabel 文本与 Boss phase, 供 E2E 用。
+        // 不改 sideDebug.ts 的接口: 用展开拼进返回对象 (展开不触发多余属性检查)。
+        const boss = this.enemies.find((e) => e.kind === 'boss');
+        const bossDebug = {
+          bossBarLabel: boss ? this.bossBarLabel.text : '',
+          bossPhase: boss ? boss.phase : 0,
+        };
+        return {
+          scene: 'SideGameScene',
+          ...bossDebug,
         x: Math.round(this.player.x),
         y: Math.round(this.player.y),
         hp: this.hp,
@@ -396,7 +413,8 @@ export class SideGameScene extends Phaser.Scene {
         contactSignals: this.contactSignals.slice(),
         enemyBoltsAlive: this.enemyBolts.length,
         coinDropsAlive: this.coinDrops.length,
-      }),
+        };
+      },
       spawnEnemyNearPlayer: (kind: EnemyKind = 'paper') => {
         if (this.gameOverTriggered) {
           return;
@@ -533,9 +551,11 @@ export class SideGameScene extends Phaser.Scene {
     this.squashTimer = 0;
     this.facing = 1;
     this.walkTimer = 0;
-    this.walkFrame = false;
+    this.walkFrameIndex = 0;
     this.swingCooldown = 0;
     this.swingVisualTimer = 0;
+    this.swingHeavy = false;
+    this.swingVisualTotal = 0;
     this.jHeld = false;
     this.jHoldStartMs = 0;
     this.rollTimer = 0;
@@ -553,21 +573,64 @@ export class SideGameScene extends Phaser.Scene {
   private createArenaBase(): void {
     this.groundGroup = this.physics.add.staticGroup();
 
-    // Ground: top at y = 500
-    const ground = this.add.rectangle(ARENA_WIDTH / 2, SIDE_GROUND_Y + 20, ARENA_WIDTH, 40, 0x2e2118).setDepth(4);
+    // Ground: top at y = 500, tile_ground 平铺 960×40。
+    const ground = this.add
+      .tileSprite(0, SIDE_GROUND_Y, ARENA_WIDTH, 40, 'tile_ground')
+      .setOrigin(0, 0)
+      .setDepth(4);
     this.add.rectangle(ARENA_WIDTH / 2, SIDE_GROUND_Y + 2, ARENA_WIDTH, 4, 0x8a5a33).setDepth(5);
     this.groundGroup.add(ground);
 
     this.platforms = this.physics.add.staticGroup();
   }
 
+  /** 前景遮挡 (depth 11): 顶檐一条 + 悬索两条 (y=150 横贯、y=300 两侧各一截),
+   * 一次性加, 不进门区与蓄力条区。 */
+  private createForeground(): void {
+    this.add
+      .tileSprite(0, 60, ARENA_WIDTH, 32, 'decor_eaves')
+      .setOrigin(0, 0)
+      .setDepth(11);
+    this.add
+      .tileSprite(0, 150, ARENA_WIDTH, 16, 'decor_rope')
+      .setOrigin(0, 0)
+      .setDepth(11);
+    // y=300 悬索只在两侧露一截 (x 0–64 / 896–960): 平台到不了墙带、地面怪顶约 y 400,
+    // 两侧段遮不到任何敌人。
+    this.add
+      .tileSprite(0, 300, 64, 16, 'decor_rope')
+      .setOrigin(0, 0)
+      .setDepth(11);
+    this.add
+      .tileSprite(ARENA_WIDTH - 64, 300, 64, 16, 'decor_rope')
+      .setOrigin(0, 0)
+      .setDepth(11);
+  }
+
   private addPlatform(x: number, y: number, w: number, h: number): void {
-    const plat = this.add.rectangle(x, y, w, h, 0x5a3a22).setStrokeStyle(2, 0xc9973f).setDepth(4);
-    this.platforms.add(plat);
-    const body = plat.body as Phaser.Physics.Arcade.StaticBody;
+    // 物理体: 与原平台同 x/y/w/h 的不可见静态体 (单向平台标志照旧)。
+    const bodyRect = this.add.rectangle(x, y, w, h, 0x000000, 0).setVisible(false);
+    this.platforms.add(bodyRect);
+    const body = bodyRect.body as Phaser.Physics.Arcade.StaticBody;
     body.checkCollision.down = false;
     body.checkCollision.left = false;
     body.checkCollision.right = false;
+    // 视觉: 左端 + 中段 + 右端三段式 (depth 4), 位置与尺寸不动。
+    const leftX = x - w / 2;
+    const topY = y - h / 2;
+    for (const seg of computePlatformTileLayout(w)) {
+      if (seg.key === 'tile_platform_mid') {
+        this.add
+          .tileSprite(leftX + seg.offsetX, topY, seg.width, h, seg.key)
+          .setOrigin(0, 0)
+          .setDepth(4);
+      } else {
+        this.add
+          .image(leftX + seg.offsetX, topY, seg.key)
+          .setOrigin(0, 0)
+          .setDepth(4);
+      }
+    }
   }
 
   private createPlayer(): void {
@@ -786,7 +849,7 @@ export class SideGameScene extends Phaser.Scene {
     const cfg = sideEnemyStatsForKind(kind);
     const sprite = this.physics.add
       .sprite(footX, surfaceY - 22, enemyTextureKey(kind))
-      .setDepth(kind === 'boss' ? 8 : 7);
+      .setDepth(7);
     sprite.setCollideWorldBounds(true);
     const body = sprite.body as Phaser.Physics.Arcade.Body;
     this.setEnemyVisualScale(sprite, cfg.visualScale);
@@ -824,6 +887,7 @@ export class SideGameScene extends Phaser.Scene {
       aiTimer: kind === 'shooter' ? SHOOTER_FIRE_COOLDOWN * 0.6 : kind === 'boss' ? 2.0 : 1.2,
       lungeTimer: 0,
       windupTimer: 0,
+      boltTimer: 0,
       lungeDir: -1,
       phase: 1,
       frozen,
@@ -876,6 +940,14 @@ export class SideGameScene extends Phaser.Scene {
     if (template.type === 'shop') {
       this.buildShopCounter();
     }
+
+    if (template.type === 'chest') {
+      // 宝箱本体 (64×48, 中心 (480,476) 落地): 铜钱锚点不动, 铜钱 depth 7 仍在箱前。
+      const chest = this.add.image(480, 476, 'tile_chest').setDepth(4);
+      this.roomDecor.push(chest);
+    }
+
+    this.buildRoomDecor(template.type);
 
     this.resetPlayerForRoom();
     for (const s of template.spawns) {
@@ -942,6 +1014,8 @@ export class SideGameScene extends Phaser.Scene {
     this.platforms.clear(false, true);
 
     for (const decor of this.roomDecor) {
+      // Boss 房青烟带循环 tween: 先停 tween 再销毁, 不留挂起的补间指向死对象。
+      this.tweens.killTweensOf(decor);
       decor.destroy();
     }
     this.roomDecor = [];
@@ -995,7 +1069,7 @@ export class SideGameScene extends Phaser.Scene {
     body.reset(100, SIDE_GROUND_Y - 22);
     this.facing = 1;
     this.walkTimer = 0;
-    this.walkFrame = false;
+    this.walkFrameIndex = 0;
   }
 
   private showRoomBanner(text: string): void {
@@ -1009,12 +1083,68 @@ export class SideGameScene extends Phaser.Scene {
     });
   }
 
+  /** 房间装饰 (无碰撞, depth 2–4, 进 roomDecor 由 clearRoomState 销毁)。
+   * 禁区: 平台顶面、生成点脚底、门区 x 710–860、玩家出生点 x≈100 一带。
+   * 药柜抽屉墙无现成纹理: 用小矩形格阵在右侧墙面带画一个; 悬挂药草束无纹理, 跳过。 */
+  private buildRoomDecor(type: RoomTemplate['type']): void {
+    const decor = (key: string, x: number, y: number, depth: number): void => {
+      this.roomDecor.push(this.add.image(x, y, key).setDepth(depth));
+    };
+    if (type === 'entrance') {
+      decor('decor_pier', 40, 484, 4);
+      decor('decor_shadow_wall', 928, 476, 3);
+      decor('sign_alley', 480, 100, 3);
+    } else if (type === 'combat') {
+      decor('decor_crate', 40, 488, 4);
+      decor('decor_basket', 920, 492, 4);
+      decor('decor_clothesline', 480, 130, 3);
+      decor('decor_notice', 40, 260, 3);
+      decor('decor_clutter', 200, 496, 4);
+    } else if (type === 'chest') {
+      decor('decor_candle', 560, 484, 4);
+    } else if (type === 'shop') {
+      decor('sign_medicine', 200, 396, 3);
+      decor('decor_candle', 300, 484, 4);
+      // 药柜抽屉墙: 右侧墙面带 (x 896–960) 的小抽屉格阵, 背景装饰非精灵。
+      for (let row = 0; row < 4; row += 1) {
+        for (let col = 0; col < 3; col += 1) {
+          const cell = this.add
+            .rectangle(904 + col * 18, 240 + row * 16, 16, 12, 0x5a3a22)
+            .setStrokeStyle(1, 0xc9973f)
+            .setDepth(2);
+          this.roomDecor.push(cell);
+        }
+      }
+    } else if (type === 'elite') {
+      decor('decor_altar', 40, 488, 4);
+      decor('decor_candle', 150, 484, 4);
+      decor('decor_candle', 880, 484, 4);
+      decor('decor_talisman', 400, 210, 3);
+      decor('decor_talisman', 480, 200, 3);
+      decor('decor_talisman', 560, 210, 3);
+      decor('decor_mask', 920, 250, 3);
+    } else if (type === 'boss') {
+      decor('decor_gate', 480, 280, 3);
+      decor('decor_mourning_lantern', 80, 300, 3);
+      decor('decor_mourning_lantern', 880, 300, 3);
+      // 供桌放中央走道之外 (左墙根一带), 不挡 Boss 房中央。
+      decor('decor_offering_table', 200, 488, 4);
+      const smoke = this.add.image(200, 448, 'decor_smoke').setDepth(3);
+      this.roomDecor.push(smoke);
+      this.tweens.add({
+        targets: smoke,
+        y: 408,
+        alpha: 0,
+        duration: 4000,
+        ease: 'Sine.easeOut',
+        repeat: -1,
+      });
+    }
+  }
+
   /** 商店房只摆柜台, 不卖货 (购买是切片 (c))。柜台无碰撞体, 不挡移动。 */
   private buildShopCounter(): void {
-    const counter = this.add
-      .rectangle(200, 460, 140, 80, 0x2e2118)
-      .setStrokeStyle(2, 0xc9973f)
-      .setDepth(4);
+    const counter = this.add.image(200, 468, 'tile_counter').setDepth(4);
     const label = addPixelText(this, 200, 412, '柜台', {
       size: 12,
       color: PALETTE.candleLight,
@@ -1062,11 +1192,14 @@ export class SideGameScene extends Phaser.Scene {
         : [{ choice: 0, label: '继续前进', x: 785 }];
     for (const def of defs) {
       const y = SIDE_GROUND_Y - 45;
+      // 门板像素图 64×96 居中盖在门区上 (depth 6); bg 矩形填充透明 (描边保留,
+      // 金色加粗高亮逻辑不动); 触发区 60×90、中心 740/830、中立间隙 30px 不动。
       const bg = this.add
-        .rectangle(def.x, y, 60, 90, 0x2e2118)
+        .rectangle(def.x, y, 60, 90, 0x2e2118, 0)
         .setStrokeStyle(2, 0xe8b34b)
         .setDepth(9)
         .setInteractive({ useHandCursor: true });
+      const img = this.add.image(def.x, y, 'tile_door').setDepth(6);
       const labelText = addPixelText(this, def.x, y - 58, def.label, {
         size: 12,
         color: PALETTE.paperWhite,
@@ -1086,6 +1219,7 @@ export class SideGameScene extends Phaser.Scene {
         label: def.label,
         zone,
         bg,
+        img,
         labelText,
         bounds,
         overlap,
@@ -1104,6 +1238,7 @@ export class SideGameScene extends Phaser.Scene {
       door.overlap.destroy();
       door.zone.destroy();
       door.bg.destroy();
+      door.img.destroy();
       door.labelText.destroy();
     }
     this.doors = [];
@@ -1219,6 +1354,8 @@ export class SideGameScene extends Phaser.Scene {
   private performSwordStrike(isHeavy: boolean): void {
     this.swingCooldown = SIDE_SWING_COOLDOWN;
     this.swingVisualTimer = isHeavy ? 0.22 : 0.16;
+    this.swingHeavy = isHeavy;
+    this.swingVisualTotal = this.swingVisualTimer;
     playSound('swing');
 
     const width = isHeavy ? SIDE_HEAVY_WIDTH : SIDE_SWING_WIDTH;
@@ -1824,24 +1961,69 @@ export class SideGameScene extends Phaser.Scene {
   }
 
   private updatePlayerTexture(walkingOnGround: boolean, dt: number): void {
+    // 优先级: 受击 > 翻滚 > 疾攻 > 挥剑 > 蓄力 > 空中 > 行走 > 待机。
     if (this.playerFlashTimer > 0) {
-      this.player.setTexture('player_hit');
+      this.player.setTexture('player_hurt_1');
       return;
     }
-    if (this.swingVisualTimer > 0 || this.dashTimer > 0) {
-      this.player.setTexture(this.swingVisualTimer > 0.08 ? 'player_swing_1' : 'player_swing_2');
+    if (this.rollTimer > 0) {
+      // 翻滚 0.3s, 按剩余时间分三段。
+      this.player.setTexture(
+        this.rollTimer > 0.2 ? 'player_roll_1' : this.rollTimer > 0.1 ? 'player_roll_2' : 'player_roll_3',
+      );
+      return;
+    }
+    if (this.dashTimer > 0) {
+      // 疾攻 0.18s, 每帧 0.09s。
+      this.player.setTexture(this.dashTimer > 0.09 ? 'player_dash_1' : 'player_dash_2');
+      return;
+    }
+    if (this.swingVisualTimer > 0) {
+      // 按已流逝时间分三段 (轻击总 0.16s / 重击总 0.22s)。
+      const elapsed = Math.max(0, this.swingVisualTotal - this.swingVisualTimer);
+      const third = this.swingVisualTotal / 3;
+      if (this.swingHeavy) {
+        this.player.setTexture(
+          elapsed < third ? 'player_heavy_1' : elapsed < third * 2 ? 'player_heavy_2' : 'player_heavy_3',
+        );
+      } else {
+        this.player.setTexture(
+          elapsed < third ? 'player_swing_1' : elapsed < third * 2 ? 'player_swing_2' : 'player_swing_3',
+        );
+      }
+      return;
+    }
+    if (this.jHeld) {
+      // 蓄力时长与蓄力条同一来源: performance.now() - jHoldStartMs
+      // (jHoldStartMs 记的是 DOM keydown 的 event.timeStamp, 与 performance.now() 同源;
+      // 绝不混用场景时钟 this.time.now)。
+      const heldMs = performance.now() - this.jHoldStartMs;
+      this.player.setTexture(heldMs < 250 ? 'player_charge_1' : 'player_charge_2');
+      return;
+    }
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    if (!body.blocked.down) {
+      // 空中 (非挥剑/翻滚/疾攻): 起跳蹲 / 落地蹲按 squashPhase, 其余按 vy 方向。
+      if (this.squashPhase === 'crouch') {
+        this.player.setTexture('player_jump_1');
+      } else if (this.squashPhase === 'land') {
+        this.player.setTexture('player_jump_4');
+      } else {
+        this.player.setTexture(body.velocity.y < 0 ? 'player_jump_2' : 'player_jump_3');
+      }
       return;
     }
     if (walkingOnGround) {
       this.walkTimer += dt;
-      if (this.walkTimer >= 0.14) {
+      if (this.walkTimer >= 0.08) {
         this.walkTimer = 0;
-        this.walkFrame = !this.walkFrame;
+        this.walkFrameIndex = (this.walkFrameIndex + 1) % 6;
       }
-      this.player.setTexture(this.walkFrame ? 'player_walk_1' : 'player_walk_2');
+      this.player.setTexture(`player_walk_${this.walkFrameIndex + 1}`);
       return;
     }
-    this.player.setTexture('player_idle');
+    // 待机: 按场景时钟每 0.6s 交替 idle / idle_2。
+    this.player.setTexture(Math.floor(this.time.now / 600) % 2 === 0 ? 'player_idle' : 'player_idle_2');
   }
 
   private updateEnemies(dt: number): void {
@@ -1861,6 +2043,9 @@ export class SideGameScene extends Phaser.Scene {
       }
       if (enemy.attackFlashTimer > 0) {
         enemy.attackFlashTimer = Math.max(0, enemy.attackFlashTimer - dt);
+      }
+      if (enemy.boltTimer > 0) {
+        enemy.boltTimer = Math.max(0, enemy.boltTimer - dt);
       }
 
       const eBody = enemy.sprite.body as Phaser.Physics.Arcade.Body;
@@ -1890,11 +2075,66 @@ export class SideGameScene extends Phaser.Scene {
         this.updateEnemyAi(enemy, eBody, dx, dy, dir, dt);
       }
 
-      // 纹理与缩放恢复 (受击闪白 / 攻击闪光 / 蓄力前摇共用)
-      if (enemy.flashTimer > 0 || enemy.attackFlashTimer > 0 || enemy.windupTimer > 0) {
+      // 纹理优先级: 受击剪影 > Boss 发弹 > 冲锋 > 蓄势 > 攻击帧 > 行走帧。
+      // 1.18 倍受击缩放只在行走帧恢复 (攻击闪光期间保持放大, 闪完回落)。
+      const p2 = enemy.kind === 'boss' && enemy.phase === 2;
+      if (enemy.flashTimer > 0) {
         enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+      } else if (enemy.boltTimer > 0 && enemy.kind === 'boss') {
+        enemy.sprite.setTexture(p2 ? 'enemy_boss_p2_bolt_1' : 'enemy_boss_bolt_1');
+      } else if (enemy.lungeTimer > 0 && (enemy.kind === 'swift' || enemy.kind === 'boss')) {
+        enemy.sprite.setTexture(
+          enemy.kind === 'swift'
+            ? 'enemy_swift_lunge_1'
+            : p2
+              ? 'enemy_boss_p2_lunge_1'
+              : 'enemy_boss_lunge_1',
+        );
+      } else if (enemy.windupTimer > 0 && (enemy.kind === 'swift' || enemy.kind === 'boss')) {
+        enemy.sprite.setTexture(
+          enemy.kind === 'swift'
+            ? 'enemy_swift_windup_1'
+            : p2
+              ? 'enemy_boss_p2_windup_1'
+              : 'enemy_boss_windup_1',
+        );
+      } else if (enemy.attackFlashTimer > 0) {
+        // 有专属攻击帧的种用攻击帧; swift/boss 保持剪影。
+        if (
+          enemy.kind === 'paper' ||
+          enemy.kind === 'lantern' ||
+          enemy.kind === 'shooter' ||
+          enemy.kind === 'elite'
+        ) {
+          enemy.sprite.setTexture(`enemy_${enemy.kind}_attack_1`);
+        } else {
+          enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+        }
       } else {
-        enemy.sprite.setTexture(enemyTextureKey(enemy.kind));
+        // 行走帧: 按种类的帧时交替 walk_1/walk_2, 用场景时钟 + id 错相, 不新增逐敌计时器。
+        const walkIntervalMs =
+          enemy.kind === 'paper'
+            ? 200
+            : enemy.kind === 'lantern'
+              ? 250
+              : enemy.kind === 'swift'
+                ? 120
+                : enemy.kind === 'shooter'
+                  ? 250
+                  : enemy.kind === 'elite'
+                    ? 300
+                    : 450;
+        const walkFrame =
+          Math.floor((this.time.now + enemy.id * walkIntervalMs * 0.5) / walkIntervalMs) % 2 === 0
+            ? 1
+            : 2;
+        enemy.sprite.setTexture(
+          enemy.kind === 'boss'
+            ? p2
+              ? `enemy_boss_p2_walk_${walkFrame}`
+              : `enemy_boss_walk_${walkFrame}`
+            : `enemy_${enemy.kind}_walk_${walkFrame}`,
+        );
         if (Math.abs(enemy.sprite.scaleX - enemy.baseScale) > 0.001) {
           this.setEnemyVisualScale(enemy.sprite, enemy.baseScale);
         }
@@ -1907,7 +2147,18 @@ export class SideGameScene extends Phaser.Scene {
       ) {
         enemy.contactCooldown = enemy.attackCooldown;
         enemy.attackFlashTimer = 0.18;
-        enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+        // 接触攻击即刻换攻击帧 (与下一帧纹理块的 attackFlash 分支一致):
+        // 有专属攻击帧的种用攻击帧, swift/boss 用剪影; 1.18 倍缩放保持原样。
+        if (
+          enemy.kind === 'paper' ||
+          enemy.kind === 'lantern' ||
+          enemy.kind === 'shooter' ||
+          enemy.kind === 'elite'
+        ) {
+          enemy.sprite.setTexture(`enemy_${enemy.kind}_attack_1`);
+        } else {
+          enemy.sprite.setTexture(enemyHitTextureKey(enemy.kind));
+        }
         this.setEnemyVisualScale(enemy.sprite, enemy.baseScale * 1.18);
         this.spawnContactAttackSpark(
           (this.player.x + eBody.center.x) / 2,
@@ -2143,6 +2394,8 @@ export class SideGameScene extends Phaser.Scene {
                 1,
               );
             }
+            // 发弹帧 (纯视觉计时器, updateEnemies 里递减)。
+            enemy.boltTimer = 0.2;
           } else {
             enemy.lungeTimer = 0.35;
             enemy.lungeDir = faceDir;
