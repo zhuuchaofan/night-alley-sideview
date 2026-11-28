@@ -95,6 +95,46 @@ describe('Boss 阶段 2 调色板换色', () => {
   });
 });
 
+describe('背景墙灯不画脸、光晕细而暗', () => {
+  /** 灯身中部 (rows 9–18): 亮色块 (F/6/7 连续 ≥2 格) 最多出现一块, 不许成对成眼。 */
+  it('wall_lantern 灯身中部至多一块亮色块', () => {
+    const rows = GAME_PIXEL_ART['wall_lantern'];
+    expect(rows).toHaveLength(32);
+    let brightRuns = 0;
+    for (let y = 9; y <= 18; y += 1) {
+      const runs = rows[y].match(/[F67]{2,}/g) ?? [];
+      brightRuns += runs.length;
+    }
+    expect(brightRuns).toBeLessThanOrEqual(1);
+    expect(validatePixelRows(rows).valid).toBe(true);
+  });
+
+  it('lantern_glow 只用 3/4、细环半径 ≤10 格、4 占比 ≤20%', () => {
+    const rows = GAME_PIXEL_ART['lantern_glow'];
+    expect(rows).toHaveLength(32);
+    let dots = 0;
+    let fours = 0;
+    for (let y = 0; y < 32; y += 1) {
+      for (let x = 0; x < 32; x += 1) {
+        const ch = rows[y][x];
+        if (ch === '.') {
+          continue;
+        }
+        expect(ch).toMatch(/^[34]$/);
+        const d = Math.hypot(x - 15.5, y - 15.5);
+        expect(d).toBeLessThanOrEqual(10);
+        dots += 1;
+        if (ch === '4') {
+          fours += 1;
+        }
+      }
+    }
+    expect(dots).toBeGreaterThan(0);
+    expect(fours / dots).toBeLessThanOrEqual(0.2);
+    expect(validatePixelRows(rows).valid).toBe(true);
+  });
+});
+
 describe('computePlatformTileLayout', () => {
   it.each([180, 200, 220, 240, 260])(
     '宽 %d: 左/右端完整 64, 余数只由中段裁切',
