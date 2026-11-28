@@ -176,3 +176,37 @@ describe('computePlatformTileLayout', () => {
     expect(() => computePlatformTileLayout(128)).toThrow(RangeError);
   });
 });
+
+describe('S2 (c) 双形态与符纸 5 帧校验', () => {
+  const PLAYER_C_KEYS = [
+    'player_switch_1',
+    'player_switch_2',
+    'player_talisman_1',
+    'player_talisman_2',
+  ] as const;
+
+  it.each(PLAYER_C_KEYS)('%s 符合 32×32、≤12 色、脚底行 26、宽 ≤54px', (key) => {
+    const rows = GAME_PIXEL_ART[key];
+    const res = validatePixelRows(rows);
+    expect(res.valid, res.errors.join('; ')).toBe(true);
+    let maxY = -1;
+    let minX = 32;
+    let maxX = -1;
+    for (let y = 0; y < 32; y += 1) {
+      for (let x = 0; x < 32; x += 1) {
+        if (rows[y][x] !== '.') {
+          maxY = Math.max(maxY, y);
+          minX = Math.min(minX, x);
+          maxX = Math.max(maxX, x);
+        }
+      }
+    }
+    expect(maxY).toBe(26);
+    expect((maxX - minX + 1) * 2).toBeLessThanOrEqual(54);
+  });
+
+  it('talisman_paper 符合 32×32、≤12 色', () => {
+    const res = validatePixelRows(GAME_PIXEL_ART.talisman_paper);
+    expect(res.valid, res.errors.join('; ')).toBe(true);
+  });
+});

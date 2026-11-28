@@ -1,6 +1,6 @@
 import { isBgmStarted } from './bgm.ts';
 import { getSoundState } from './sound.ts';
-import type { EnemyKind } from './balance.ts';
+import type { CurseId, EnemyKind, PlayerForm, ShopItemId } from './balance.ts';
 import type { RoomType } from './rooms.ts';
 
 export interface DoorDebugInfo {
@@ -94,6 +94,28 @@ export interface SideviewDebugState {
   enemyBoltsAlive?: number;
   /** 场上未拾取的铜钱数。 */
   coinDropsAlive?: number;
+  /** S2 (c) 双形态、霉运、商店、灯油/心魔核调试字段。 */
+  form?: PlayerForm;
+  maxHp?: number;
+  /** 玩家水平速度（切换取消疾攻验收用：中途按 Q 后应立即归零）。 */
+  velocityX?: number;
+  switchCooldown?: number;
+  talismanCooldown?: number;
+  talismanProjectilesAlive?: number;
+  curse?: CurseId | null;
+  curseMenuOpen?: boolean;
+  shopMenuOpen?: boolean;
+  shopPurchased?: ShopItemId[];
+  lampOil?: number;
+  demonCore?: number;
+  oilDropsAlive?: number;
+  coreDropsAlive?: number;
+  paused?: boolean;
+  swordDamage?: number;
+  talismanDamage?: number;
+  readonly hudFormText?: string;
+  readonly hudCurseText?: string;
+  readonly hudPickupsText?: string;
 }
 
 export type SceneSideviewDebugState = Omit<SideviewDebugState, 'soundMuted' | 'bgmStarted'>;
@@ -102,6 +124,7 @@ export interface SideviewDebugHook {
   getState(): SideviewDebugState;
   spawnEnemyNearPlayer(kind?: EnemyKind): void;
   setHp(hp: number): void;
+  setCoins?(coins: number): void;
   setSeed(seed: number): void;
   /** 测试专用: 直接进指定模板的房间 (走跳验收用), 不走选门流程。 */
   enterTemplate?(templateId: string): void;
@@ -119,6 +142,7 @@ export interface SceneSideviewDebugHook {
   getState(): SceneSideviewDebugState;
   spawnEnemyNearPlayer(kind?: EnemyKind): void;
   setHp(hp: number): void;
+  setCoins?(coins: number): void;
   setSeed(seed: number): void;
   enterTemplate?(templateId: string): void;
   teleportPlayer?(x: number, y: number): void;

@@ -189,9 +189,30 @@ export async function pressDoorConfirm(page: Page): Promise<void> {
   await page.keyboard.up('KeyE');
 }
 
-/** 当前房间已清房时, 点一扇门进下一间。 */
+/** 按住约 100ms 再松开的通用按键（菜单键 F/Digit/Q/Escape 用）。
+ * 实测：直接 press 在商店测试里约 20–40% 丢键——keydown+keyup 落在同一帧
+ * 内时连 kb.on 事件驱动的处理器也会漏（F 开店、Digit 购买均丢过），
+ * 按住 100ms 后 8/8 通过；真人按键远长于 100ms，不影响游戏本身。 */
+export async function pressKey(page: Page, key: string): Promise<void> {
+  await page.keyboard.down(key);
+  await page.waitForTimeout(100);
+  await page.keyboard.up(key);
+}
+
+/** 当前房间已清房时, 点一扇门进下一间。若精英房弹出霉运三选一，先选第 1 条再进门。 */
 export async function advanceRoom(page: Page, choice = 0): Promise<void> {
   const before = await getState(page);
+  if (before.curseMenuOpen) {
+    await pressKey(page, 'Digit1');
+    await page.waitForFunction(
+      () => {
+        const s = window.__SIDEVIEW_DEBUG__?.getState();
+        return s !== undefined && !s.curseMenuOpen && s.doors.length > 0;
+      },
+      undefined,
+      { timeout: 5000 },
+    );
+  }
   await clickDoor(page, choice);
   await waitForRoomIndex(page, before.roomIndex + 1);
 }

@@ -433,3 +433,85 @@ export function sideEnemyStatsForKind(kind: EnemyKind): SideEnemyConfig {
     stunScale: 1,
   };
 }
+
+// ---------------------------------------------------------------------------
+// S2 切片 (c): 双形态 + 轻量霉运 + 商店 + 灯油/心魔核拾取
+// ---------------------------------------------------------------------------
+
+export type PlayerForm = 'sword' | 'talisman';
+
+export const SIDE_TALISMAN_DAMAGE = 4;
+export const SIDE_TALISMAN_COOLDOWN = 0.6;
+export const SIDE_TALISMAN_SPEED = 420;
+export const SIDE_TALISMAN_RANGE = 320;
+export const SIDE_TALISMAN_FRAME_SECONDS = 0.12;
+export const SIDE_TALISMAN_VISUAL_DURATION = SIDE_TALISMAN_FRAME_SECONDS * 2;
+
+export const SIDE_SWITCH_COOLDOWN = 1.0;
+export const SIDE_SWITCH_ATTACK_DAMAGE = 3;
+export const SIDE_SWITCH_ATTACK_RANGE = 70;
+export const SIDE_SWITCH_ATTACK_HEIGHT = 56;
+export const SIDE_SWITCH_FRAME_SECONDS = 0.12;
+export const SIDE_SWITCH_VISUAL_DURATION = SIDE_SWITCH_FRAME_SECONDS * 2;
+
+export type CurseId = 'blood_pact' | 'talisman_erode' | 'treasure_gather';
+
+export interface CurseDef {
+  id: CurseId;
+  name: string;
+  desc: string;
+  badge: string;
+  color: string;
+  borderHex: number;
+}
+
+export const CURSE_ORDER: readonly CurseId[] = ['blood_pact', 'talisman_erode', 'treasure_gather'];
+
+export const CURSE_DEFS: Record<CurseId, CurseDef> = {
+  blood_pact: {
+    id: 'blood_pact',
+    name: '红 · 血契',
+    desc: '全局伤害 +30%\n血上限 -5（当前血同步扣 5，最低留 1）',
+    badge: '血契：伤+30% 血-5',
+    color: '#B03A2E',
+    borderHex: 0xb03a2e,
+  },
+  talisman_erode: {
+    id: 'talisman_erode',
+    name: '绿 · 符蚀',
+    desc: '符纸伤害 +50%，符纸冷却 -20%\n挥剑伤害 -20%',
+    badge: '符蚀：符+50% 剑-20%',
+    color: '#4E7A5A',
+    borderHex: 0x4e7a5a,
+  },
+  treasure_gather: {
+    id: 'treasure_gather',
+    name: '蓝 · 聚宝',
+    desc: '铜钱掉落 +1/只\n敌人接触伤害 +1（1→2）',
+    badge: '聚宝：钱+1 敌伤+1',
+    color: '#4E739E',
+    borderHex: 0x4e739e,
+  },
+};
+
+export type ShopItemId = 'heal' | 'sword_up' | 'talisman_up';
+
+export interface ShopItemDef {
+  id: ShopItemId;
+  name: string;
+  cost: number;
+  desc: string;
+}
+
+export const SHOP_ITEMS: readonly ShopItemDef[] = [
+  { id: 'heal', name: '买药', cost: 8, desc: '8 铜钱 · 回复 10 血（不超上限）' },
+  { id: 'sword_up', name: '强化', cost: 10, desc: '10 铜钱 · 挥剑伤害 +2' },
+  { id: 'talisman_up', name: '符纸', cost: 6, desc: '6 铜钱 · 符纸伤害 +2' },
+];
+
+export const SHOP_COUNTER_X = 200;
+export const SHOP_COUNTER_INTERACT_RADIUS = 84;
+
+export const ELITE_LAMP_OIL_DROP = 1;
+export const BOSS_LAMP_OIL_DROP = 2;
+export const BOSS_DEMON_CORE_DROP = 1;

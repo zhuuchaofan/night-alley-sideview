@@ -2,10 +2,21 @@ import Phaser from 'phaser';
 import {
   ARENA_HEIGHT,
   ARENA_WIDTH,
+  BOSS_DEMON_CORE_DROP,
+  BOSS_LAMP_OIL_DROP,
+  CURSE_DEFS,
+  CURSE_ORDER,
+  type CurseId,
+  ELITE_LAMP_OIL_DROP,
   type EnemyKind,
   HUD_HEIGHT,
   PLAYER_MAX_HP,
   PLAYER_SPEED,
+  type PlayerForm,
+  SHOP_COUNTER_INTERACT_RADIUS,
+  SHOP_COUNTER_X,
+  SHOP_ITEMS,
+  type ShopItemId,
   SHOOTER_BOLT_DAMAGE,
   SHOOTER_BOLT_SPEED,
   SHOOTER_FIRE_COOLDOWN,
@@ -33,6 +44,18 @@ import {
   SIDE_SWING_DAMAGE,
   SIDE_SWING_HEIGHT,
   SIDE_SWING_WIDTH,
+  SIDE_SWITCH_ATTACK_DAMAGE,
+  SIDE_SWITCH_ATTACK_HEIGHT,
+  SIDE_SWITCH_ATTACK_RANGE,
+  SIDE_SWITCH_COOLDOWN,
+  SIDE_SWITCH_FRAME_SECONDS,
+  SIDE_SWITCH_VISUAL_DURATION,
+  SIDE_TALISMAN_COOLDOWN,
+  SIDE_TALISMAN_DAMAGE,
+  SIDE_TALISMAN_FRAME_SECONDS,
+  SIDE_TALISMAN_RANGE,
+  SIDE_TALISMAN_SPEED,
+  SIDE_TALISMAN_VISUAL_DURATION,
   SIDE_WALL_WIDTH,
   sideEnemyStatsForKind,
 } from '../game/balance.ts';
@@ -135,6 +158,16 @@ interface EnemyBolt {
   life: number;
 }
 
+interface TalismanProjectile {
+  sprite: Phaser.GameObjects.Image;
+  dir: 1 | -1;
+  vx: number;
+  rangeLeft: number;
+  damage: number;
+}
+
+type PickupKind = 'coin' | 'oil' | 'core';
+
 function enemyTextureKey(kind: EnemyKind): string {
   return `enemy_${kind}`;
 }
@@ -146,6 +179,7 @@ function enemyHitTextureKey(kind: EnemyKind): string {
 interface CoinDrop {
   /** Non-physics image; the logical position never moves during the scatter. */
   sprite: Phaser.GameObjects.Image;
+  kind: PickupKind;
   logicalX: number;
   logicalY: number;
   scatterVx: number;
@@ -193,8 +227,24 @@ export class SideGameScene extends Phaser.Scene {
   private nextEnemyId = 1;
 
   private hp = PLAYER_MAX_HP;
+  private maxHp = PLAYER_MAX_HP;
   private kills = 0;
   private coins = 0;
+  private lampOil = 0;
+  private demonCore = 0;
+  private form: PlayerForm = 'sword';
+  private switchCooldown = 0;
+  private switchVisualTimer = 0;
+  private talismanCooldown = 0;
+  private talismanVisualTimer = 0;
+  private talismanProjectiles: TalismanProjectile[] = [];
+  private curse: CurseId | null = null;
+  private shopPurchased = new Set<ShopItemId>();
+  private swordDamageBonus = 0;
+  private talismanDamageBonus = 0;
+  private activeOverlay: 'curse' | 'shop' | null = null;
+  private overlayObjects: Phaser.GameObjects.GameObject[] = [];
+  private shopHintText!: Phaser.GameObjects.BitmapText;
   private roomCleared = false;
   private gameOverTriggered = false;
 
@@ -272,8 +322,11 @@ export class SideGameScene extends Phaser.Scene {
   private enemiesText!: Phaser.GameObjects.BitmapText;
   private roomText!: Phaser.GameObjects.BitmapText;
   private coinsText!: Phaser.GameObjects.BitmapText;
+  private pickupsHudText!: Phaser.GameObjects.BitmapText;
   private rollHudText!: Phaser.GameObjects.BitmapText;
   private dashHudText!: Phaser.GameObjects.BitmapText;
+  private formHudText!: Phaser.GameObjects.BitmapText;
+  private curseHudText!: Phaser.GameObjects.BitmapText;
   private bossBarBg!: Phaser.GameObjects.Rectangle;
   private bossBarFill!: Phaser.GameObjects.Rectangle;
   private bossBarLabel!: Phaser.GameObjects.BitmapText;
@@ -413,7 +466,27 @@ export class SideGameScene extends Phaser.Scene {
         }),
         contactSignals: this.contactSignals.slice(),
         enemyBoltsAlive: this.enemyBolts.length,
-        coinDropsAlive: this.coinDrops.length,
+        coinDropsAlive: this.coinDrops.filter((d) => d.kind === 'coin').length,
+        form: this.form,
+        maxHp: this.maxHp,
+        velocityX: Math.round((this.player.body as Phaser.Physics.Arcade.Body).velocity.x),
+        switchCooldown: Number(this.switchCooldown.toFixed(3)),
+        talismanCooldown: Number(this.talismanCooldown.toFixed(3)),
+        talismanProjectilesAlive: this.talismanProjectiles.length,
+        curse: this.curse,
+        curseMenuOpen: this.activeOverlay === 'curse',
+        shopMenuOpen: this.activeOverlay === 'shop',
+        shopPurchased: [...this.shopPurchased],
+        lampOil: this.lampOil,
+        demonCore: this.demonCore,
+        oilDropsAlive: this.coinDrops.filter((d) => d.kind === 'oil').length,
+        coreDropsAlive: this.coinDrops.filter((d) => d.kind === 'core').length,
+        paused: this.physics.world.isPaused,
+        swordDamage: this.getSwordDamage(false),
+        talismanDamage: this.getTalismanDamage(),
+        hudFormText: this.formHudText.text,
+        hudCurseText: this.curseHudText.visible ? this.curseHudText.text : '',
+        hudPickupsText: this.pickupsHudText.text,
         };
       },
       spawnEnemyNearPlayer: (kind: EnemyKind = 'paper') => {
@@ -471,11 +544,18 @@ export class SideGameScene extends Phaser.Scene {
         if (this.gameOverTriggered) {
           return;
         }
-        this.hp = Math.max(0, Math.min(PLAYER_MAX_HP, nextHp));
+        this.hp = Math.max(0, Math.min(this.maxHp, nextHp));
         this.updateHud();
         if (this.hp <= 0) {
           this.triggerGameOver();
         }
+      },
+      setCoins: (nextCoins: number) => {
+        if (this.gameOverTriggered) {
+          return;
+        }
+        this.coins = Math.max(0, nextCoins);
+        this.updateHud();
       },
       // 只写待用种子, 不改当前局; 下次开局 (经标题) 时消费一次。
       setSeed: (seed: number) => {
@@ -527,8 +607,23 @@ export class SideGameScene extends Phaser.Scene {
     this.damageNumbers = [];
     this.nextEnemyId = 1;
     this.hp = PLAYER_MAX_HP;
+    this.maxHp = PLAYER_MAX_HP;
     this.kills = 0;
     this.coins = 0;
+    this.lampOil = 0;
+    this.demonCore = 0;
+    this.form = 'sword';
+    this.switchCooldown = 0;
+    this.switchVisualTimer = 0;
+    this.talismanCooldown = 0;
+    this.talismanVisualTimer = 0;
+    this.talismanProjectiles = [];
+    this.curse = null;
+    this.shopPurchased.clear();
+    this.swordDamageBonus = 0;
+    this.talismanDamageBonus = 0;
+    this.activeOverlay = null;
+    this.overlayObjects = [];
     this.roomCleared = false;
     this.gameOverTriggered = false;
     this.roomIndex = 0;
@@ -669,12 +764,17 @@ export class SideGameScene extends Phaser.Scene {
     this.add.rectangle(ARENA_WIDTH / 2, HUD_HEIGHT / 2, ARENA_WIDTH, HUD_HEIGHT, 0x10182b, 0.92).setDepth(20);
     this.add.rectangle(ARENA_WIDTH / 2, HUD_HEIGHT, ARENA_WIDTH, 2, 0xc9973f).setDepth(20);
 
-    this.hpText = addPixelText(this, 20, 22, '', { size: 24, color: PALETTE.paperWhite, origin: [0, 0.5] }).setDepth(21);
-    this.enemiesText = addPixelText(this, 200, 22, '', { size: 24, color: PALETTE.vermilion, origin: [0, 0.5] }).setDepth(21);
-    this.roomText = addPixelText(this, 290, 22, '', { size: 24, color: PALETTE.candleLight, origin: [0, 0.5] }).setDepth(21);
-    this.coinsText = addPixelText(this, 400, 22, '', { size: 24, color: PALETTE.lanternYellow, origin: [0, 0.5] }).setDepth(21);
-    this.rollHudText = addPixelText(this, 520, 22, '', { size: 24, color: PALETTE.silverBlue, origin: [0, 0.5] }).setDepth(21);
-    this.dashHudText = addPixelText(this, 660, 22, '', { size: 24, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
+    this.hpText = addPixelText(this, 16, 22, '', { size: 24, color: PALETTE.paperWhite, origin: [0, 0.5] }).setDepth(21);
+    this.enemiesText = addPixelText(this, 160, 22, '', { size: 24, color: PALETTE.vermilion, origin: [0, 0.5] }).setDepth(21);
+    this.roomText = addPixelText(this, 248, 22, '', { size: 24, color: PALETTE.candleLight, origin: [0, 0.5] }).setDepth(21);
+    this.coinsText = addPixelText(this, 360, 22, '', { size: 24, color: PALETTE.lanternYellow, origin: [0, 0.5] }).setDepth(21);
+    this.pickupsHudText = addPixelText(this, 456, 22, '', { size: 12, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
+    this.rollHudText = addPixelText(this, 550, 22, '', { size: 24, color: PALETTE.silverBlue, origin: [0, 0.5] }).setDepth(21);
+    this.dashHudText = addPixelText(this, 675, 22, '', { size: 24, color: PALETTE.oldPaper, origin: [0, 0.5] }).setDepth(21);
+    this.formHudText = addPixelText(this, 800, 14, '', { size: 12, color: PALETTE.paperWhite, origin: [0, 0.5] }).setDepth(21);
+    this.curseHudText = addPixelText(this, 800, 30, '', { size: 12, color: PALETTE.vermilion, origin: [0, 0.5] })
+      .setDepth(21)
+      .setVisible(false);
 
     this.bossBarBg = this.add
       .rectangle(ARENA_WIDTH / 2, HUD_HEIGHT + 22, 320, 12, 0x17120c, 0.9)
@@ -738,6 +838,13 @@ export class SideGameScene extends Phaser.Scene {
     })
       .setDepth(11)
       .setVisible(false);
+    this.shopHintText = addPixelText(this, SHOP_COUNTER_X, 392, '按 F 开店', {
+      size: 12,
+      color: PALETTE.lanternYellow,
+      origin: 0.5,
+    })
+      .setDepth(11)
+      .setVisible(false);
   }
 
   private bindInputs(): void {
@@ -772,7 +879,22 @@ export class SideGameScene extends Phaser.Scene {
     this.keyE = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
     const onKeyDownJ = (event: KeyboardEvent): void => {
-      if (this.gameOverTriggered || this.rollTimer > 0 || this.dashTimer > 0 || this.jHeld) {
+      if (
+        this.activeOverlay !== null ||
+        this.physics.world.isPaused ||
+        this.gameOverTriggered ||
+        this.rollTimer > 0 ||
+        this.dashTimer > 0
+      ) {
+        return;
+      }
+      if (this.form === 'talisman') {
+        if (this.talismanCooldown <= 0) {
+          this.performTalismanAttack();
+        }
+        return;
+      }
+      if (this.jHeld) {
         return;
       }
       this.jHeld = true;
@@ -784,12 +906,53 @@ export class SideGameScene extends Phaser.Scene {
     };
 
     const onKeyUpJ = (event: KeyboardEvent): void => {
+      if (this.form === 'talisman') {
+        this.jHeld = false;
+        return;
+      }
       if (!this.jHeld || this.gameOverTriggered) {
         this.jHeld = false;
         return;
       }
       this.releaseSwordAttack(event.timeStamp - this.jHoldStartMs);
     };
+
+    const onKeyDownQ = (event: KeyboardEvent): void => {
+      if (event.repeat) {
+        return;
+      }
+      if (this.activeOverlay !== null || this.physics.world.isPaused || this.gameOverTriggered || this.stageCleared) {
+        return;
+      }
+      this.trySwitchForm();
+    };
+
+    const onKeyDownF = (event: KeyboardEvent): void => {
+      if (event.repeat) {
+        return;
+      }
+      if (this.gameOverTriggered || this.stageCleared) {
+        return;
+      }
+      if (this.activeOverlay === 'shop') {
+        this.closeOverlay();
+        return;
+      }
+      if (this.activeOverlay === null && !this.physics.world.isPaused && this.isNearShopCounter()) {
+        this.openShopMenu();
+      }
+    };
+
+    const onDigitChoice = (idx: 0 | 1 | 2): void => {
+      if (this.activeOverlay === 'curse') {
+        this.selectCurse(CURSE_ORDER[idx]);
+      } else if (this.activeOverlay === 'shop') {
+        this.buyShopItem(SHOP_ITEMS[idx].id);
+      }
+    };
+    const onKey1 = (): void => onDigitChoice(0);
+    const onKey2 = (): void => onDigitChoice(1);
+    const onKey3 = (): void => onDigitChoice(2);
 
     const onRestart = (): void => {
       // 只有整关打通 (stageCleared) 才解锁 R: 同种子重试本局。
@@ -799,6 +962,10 @@ export class SideGameScene extends Phaser.Scene {
     };
 
     const onEscape = (): void => {
+      if (this.activeOverlay === 'shop') {
+        this.closeOverlay();
+        return;
+      }
       if (this.stageCleared) {
         this.scene.start('TitleScene');
       }
@@ -806,6 +973,11 @@ export class SideGameScene extends Phaser.Scene {
 
     kb.on('keydown-J', onKeyDownJ);
     kb.on('keyup-J', onKeyUpJ);
+    kb.on('keydown-Q', onKeyDownQ);
+    kb.on('keydown-F', onKeyDownF);
+    kb.on('keydown-ONE', onKey1);
+    kb.on('keydown-TWO', onKey2);
+    kb.on('keydown-THREE', onKey3);
     kb.on('keydown-R', onRestart);
     kb.on('keydown-ESC', onEscape);
 
@@ -816,6 +988,11 @@ export class SideGameScene extends Phaser.Scene {
       this.events.off(Phaser.Scenes.Events.POST_UPDATE, this.processPendingTransition, this);
       kb.off('keydown-J', onKeyDownJ);
       kb.off('keyup-J', onKeyUpJ);
+      kb.off('keydown-Q', onKeyDownQ);
+      kb.off('keydown-F', onKeyDownF);
+      kb.off('keydown-ONE', onKey1);
+      kb.off('keydown-TWO', onKey2);
+      kb.off('keydown-THREE', onKey3);
       kb.off('keydown-R', onRestart);
       kb.off('keydown-ESC', onEscape);
     };
@@ -996,6 +1173,13 @@ export class SideGameScene extends Phaser.Scene {
     }
     this.coinDrops = [];
 
+    for (const proj of this.talismanProjectiles) {
+      proj.sprite.destroy();
+    }
+    this.talismanProjectiles = [];
+    this.closeOverlay();
+    this.shopHintText.setVisible(false);
+
     for (const entry of [...this.damageNumbers]) {
       this.removeDamageNumber(entry);
     }
@@ -1037,6 +1221,8 @@ export class SideGameScene extends Phaser.Scene {
     this.jHoldStartMs = 0;
     this.hideChargeBar();
     this.swingVisualTimer = 0;
+    this.switchVisualTimer = 0;
+    this.talismanVisualTimer = 0;
     this.rollTimer = 0;
     this.rollCooldown = 0;
     this.rollActiveThisFrame = false;
@@ -1170,9 +1356,203 @@ export class SideGameScene extends Phaser.Scene {
       this.clearEnemyBolts();
       this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
       this.clearGroup.setVisible(true);
+    } else if (this.currentTemplate.type === 'elite' && this.curse === null) {
+      this.openCurseMenu();
     } else {
       this.showDoors();
     }
+    this.updateHud();
+  }
+
+  private isNearShopCounter(): boolean {
+    return (
+      this.currentTemplate.type === 'shop' &&
+      Math.abs(this.player.x - SHOP_COUNTER_X) <= SHOP_COUNTER_INTERACT_RADIUS
+    );
+  }
+
+  private updateShopPrompt(): void {
+    const visible =
+      this.activeOverlay === null &&
+      !this.stageCleared &&
+      !this.gameOverTriggered &&
+      this.isNearShopCounter();
+    this.shopHintText.setVisible(visible);
+  }
+
+  private pauseForOverlay(kind: 'curse' | 'shop'): void {
+    this.activeOverlay = kind;
+    this.jHeld = false;
+    this.jHoldStartMs = 0;
+    this.hideChargeBar();
+    this.physics.world.pause();
+  }
+
+  private closeOverlay(): void {
+    for (const obj of this.overlayObjects) {
+      obj.destroy();
+    }
+    this.overlayObjects = [];
+    if (this.activeOverlay !== null) {
+      this.activeOverlay = null;
+      if (this.scene.isActive() && !this.hitstopEvent) {
+        this.physics.world.resume();
+      }
+    }
+  }
+
+  private openCurseMenu(): void {
+    if (this.activeOverlay !== null) {
+      return;
+    }
+    this.pauseForOverlay('curse');
+
+    const backdrop = this.add
+      .rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT, 0x10182b, 0.72)
+      .setDepth(27);
+    const panel = this.add
+      .rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, 740, 320, 0x1b2a4a, 0.96)
+      .setStrokeStyle(3, 0xc9973f)
+      .setDepth(27);
+    const title = addPixelText(this, ARENA_WIDTH / 2, 145, '霉运抉择（三选一）', {
+      size: 24,
+      color: PALETTE.lanternYellow,
+      origin: 0.5,
+    }).setDepth(28);
+    const hint = addPixelText(this, ARENA_WIDTH / 2, 395, '按 1/2/3 或点击选择（整局生效，选完开门）', {
+      size: 12,
+      color: PALETTE.silverBlue,
+      origin: 0.5,
+    }).setDepth(28);
+    this.overlayObjects.push(backdrop, panel, title, hint);
+
+    CURSE_ORDER.forEach((curseId, idx) => {
+      const def = CURSE_DEFS[curseId];
+      const cx = ARENA_WIDTH / 2 + (idx - 1) * 228;
+      const cy = 270;
+      const card = this.add
+        .rectangle(cx, cy, 210, 175, 0x2e2118, 0.95)
+        .setStrokeStyle(2, def.borderHex)
+        .setDepth(28)
+        .setInteractive({ useHandCursor: true });
+      const keyTag = addPixelText(this, cx, cy - 66, `[${idx + 1}] ${def.name}`, {
+        size: 12,
+        color: def.color,
+        origin: 0.5,
+      }).setDepth(29);
+      const desc = addPixelText(this, cx, cy + 8, def.desc, {
+        size: 12,
+        color: PALETTE.candleLight,
+        origin: 0.5,
+        align: 1,
+      }).setDepth(29);
+      card.on('pointerdown', () => this.selectCurse(curseId));
+      this.overlayObjects.push(card, keyTag, desc);
+    });
+  }
+
+  private selectCurse(curseId: CurseId): void {
+    if (this.activeOverlay !== 'curse' || this.curse !== null) {
+      return;
+    }
+    this.curse = curseId;
+    if (curseId === 'blood_pact') {
+      this.maxHp = Math.max(1, this.maxHp - 5);
+      this.hp = Math.max(1, Math.min(this.maxHp, this.hp - 5));
+    }
+    this.closeOverlay();
+    playSound('levelUp');
+    this.showDoors();
+    this.updateHud();
+  }
+
+  private openShopMenu(): void {
+    if (this.activeOverlay !== null) {
+      return;
+    }
+    this.pauseForOverlay('shop');
+
+    const backdrop = this.add
+      .rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, ARENA_WIDTH, ARENA_HEIGHT, 0x10182b, 0.72)
+      .setDepth(27);
+    const panel = this.add
+      .rectangle(ARENA_WIDTH / 2, ARENA_HEIGHT / 2, 740, 320, 0x1b2a4a, 0.96)
+      .setStrokeStyle(3, 0xe8b34b)
+      .setDepth(27);
+    const title = addPixelText(this, ARENA_WIDTH / 2, 145, `夜巷当铺（铜钱：${this.coins}）`, {
+      size: 24,
+      color: PALETTE.lanternYellow,
+      origin: 0.5,
+    }).setDepth(28);
+    const hint = addPixelText(this, ARENA_WIDTH / 2, 395, '按 1/2/3 或点击购买 · F/Esc 关闭', {
+      size: 12,
+      color: PALETTE.silverBlue,
+      origin: 0.5,
+    }).setDepth(28);
+    this.overlayObjects.push(backdrop, panel, title, hint);
+
+    SHOP_ITEMS.forEach((item, idx) => {
+      const bought = this.shopPurchased.has(item.id);
+      const affordable = !bought && this.coins >= item.cost;
+      const cx = ARENA_WIDTH / 2 + (idx - 1) * 228;
+      const cy = 270;
+      const card = this.add
+        .rectangle(cx, cy, 210, 175, 0x2e2118, affordable ? 0.95 : 0.45)
+        .setStrokeStyle(2, affordable ? 0xe8b34b : 0x4e739e)
+        .setDepth(28);
+      if (affordable) {
+        card.setInteractive({ useHandCursor: true });
+        card.on('pointerdown', () => this.buyShopItem(item.id));
+      }
+      const nameText = addPixelText(this, cx, cy - 60, `[${idx + 1}] ${item.name}`, {
+        size: 24,
+        color: affordable ? PALETTE.paperWhite : PALETTE.silverBlue,
+        origin: 0.5,
+      })
+        .setAlpha(affordable ? 1 : 0.5)
+        .setDepth(29);
+      const descText = addPixelText(this, cx, cy + 4, item.desc, {
+        size: 12,
+        color: affordable ? PALETTE.candleLight : PALETTE.silverBlue,
+        origin: 0.5,
+        align: 1,
+      })
+        .setAlpha(affordable ? 1 : 0.5)
+        .setDepth(29);
+      const statusText = addPixelText(
+        this,
+        cx,
+        cy + 58,
+        bought ? '已购' : affordable ? `${item.cost} 铜钱` : '铜钱不足',
+        {
+          size: 12,
+          color: bought ? PALETTE.jadeGreen : affordable ? PALETTE.lanternYellow : PALETTE.vermilion,
+          origin: 0.5,
+        },
+      ).setDepth(29);
+      this.overlayObjects.push(card, nameText, descText, statusText);
+    });
+  }
+
+  private buyShopItem(itemId: ShopItemId): void {
+    if (this.activeOverlay !== 'shop' || this.shopPurchased.has(itemId)) {
+      return;
+    }
+    const item = SHOP_ITEMS.find((it) => it.id === itemId);
+    if (!item || this.coins < item.cost) {
+      return;
+    }
+    this.coins -= item.cost;
+    this.shopPurchased.add(item.id);
+    if (item.id === 'heal') {
+      this.hp = Math.min(this.maxHp, this.hp + 10);
+    } else if (item.id === 'sword_up') {
+      this.swordDamageBonus += 2;
+    } else if (item.id === 'talisman_up') {
+      this.talismanDamageBonus += 2;
+    }
+    playSound('levelUp');
+    this.closeOverlay();
     this.updateHud();
   }
 
@@ -1305,6 +1685,11 @@ export class SideGameScene extends Phaser.Scene {
    * 不在物理回调内销毁任何东西。doorUsed 锁定后重复提交直接返回。
    */
   private submitDoor(choice: number): void {
+    // 菜单打开期间（霉运/商店）禁止换房：商店房自动清房后已有单门，
+    // 点门区否则会绕过暂停、直接换房并销毁菜单。
+    if (this.activeOverlay !== null) {
+      return;
+    }
     this.doorSubmitAttempts += 1;
     if (this.doorUsed || this.stageCleared || this.gameOverTriggered) {
       return;
@@ -1361,7 +1746,7 @@ export class SideGameScene extends Phaser.Scene {
 
     const width = isHeavy ? SIDE_HEAVY_WIDTH : SIDE_SWING_WIDTH;
     const height = isHeavy ? SIDE_HEAVY_HEIGHT : SIDE_SWING_HEIGHT;
-    const damage = isHeavy ? SIDE_HEAVY_DAMAGE : SIDE_SWING_DAMAGE;
+    const damage = this.getSwordDamage(isHeavy);
     const stunDuration = isHeavy ? 0.35 : 0.16;
 
     const hitCenterX = this.player.x + this.facing * (width * 0.52);
@@ -1418,6 +1803,191 @@ export class SideGameScene extends Phaser.Scene {
     }
   }
 
+  private roundDmg(n: number): number {
+    return Math.round(n * 10) / 10;
+  }
+
+  private getGlobalDamageMult(): number {
+    return this.curse === 'blood_pact' ? 1.3 : 1;
+  }
+
+  private getSwordDamage(isHeavy: boolean): number {
+    const base = (isHeavy ? SIDE_HEAVY_DAMAGE : SIDE_SWING_DAMAGE) + this.swordDamageBonus;
+    const curseMult = this.curse === 'talisman_erode' ? 0.8 : 1;
+    return this.roundDmg(base * curseMult * this.getGlobalDamageMult());
+  }
+
+  private getTalismanDamage(): number {
+    const base = SIDE_TALISMAN_DAMAGE + this.talismanDamageBonus;
+    const curseMult = this.curse === 'talisman_erode' ? 1.5 : 1;
+    return this.roundDmg(base * curseMult * this.getGlobalDamageMult());
+  }
+
+  private getTalismanCooldown(): number {
+    return SIDE_TALISMAN_COOLDOWN * (this.curse === 'talisman_erode' ? 0.8 : 1);
+  }
+
+  private getSwitchAttackDamage(): number {
+    return this.roundDmg(SIDE_SWITCH_ATTACK_DAMAGE * this.getGlobalDamageMult());
+  }
+
+  private getDashDamage(): number {
+    return this.roundDmg(SIDE_DASH_DAMAGE * this.getGlobalDamageMult());
+  }
+
+  private getEnemyContactDamage(base: number): number {
+    return base + (this.curse === 'treasure_gather' ? 1 : 0);
+  }
+
+  private trySwitchForm(): void {
+    if (this.switchCooldown > 0) {
+      return;
+    }
+    this.form = this.form === 'sword' ? 'talisman' : 'sword';
+    this.switchCooldown = SIDE_SWITCH_COOLDOWN;
+    this.switchVisualTimer = SIDE_SWITCH_VISUAL_DURATION;
+
+    // 切换取消当前动作：挥剑 / 符纸 / 蓄力 / 翻滚 / 疾攻全部取消
+    this.swingVisualTimer = 0;
+    this.talismanVisualTimer = 0;
+    this.jHeld = false;
+    this.jHoldStartMs = 0;
+    this.hideChargeBar();
+    if (this.rollTimer > 0) {
+      this.rollTimer = 0;
+      this.rollActiveThisFrame = false;
+      this.player.setAlpha(1);
+      this.player.setAngle(0);
+    }
+    // 翻滚刚结束的宽限帧（rollJustEnded）也要随切换取消，否则残留一帧无敌。
+    this.rollJustEnded = false;
+    if (this.dashTimer > 0 || this.dashCleanupPending) {
+      this.dashTimer = 0;
+      this.dashCleanupPending = false;
+      this.dashHitIds.clear();
+      const body = this.player.body as Phaser.Physics.Arcade.Body;
+      body.setAllowGravity(true);
+      // 必须立即清水平速度：物理先于场景 update 更新，按 Q 后旧的 520 px/s
+      // 疾攻速度否则还会被再用一步；同时撤回已挂起的末段命中结算。
+      body.setVelocityX(0);
+      this.player.setAngle(0);
+    }
+    this.cancelSquash();
+    playSound('swing');
+
+    // 换形攻击：短程冲击（伤害 3、范围约 70、前方扇形、只命中一次）
+    const width = SIDE_SWITCH_ATTACK_RANGE;
+    const height = SIDE_SWITCH_ATTACK_HEIGHT;
+    const hitCenterX = this.player.x + this.facing * (width * 0.5);
+    const hitCenterY = this.player.y;
+    const hitbox = new Phaser.Geom.Rectangle(
+      hitCenterX - width / 2,
+      hitCenterY - height / 2,
+      width,
+      height,
+    );
+
+    const fan = this.add
+      .image(hitCenterX, hitCenterY, 'slash_arc')
+      .setFlipX(this.facing < 0)
+      .setDisplaySize(width, height)
+      .setTint(this.form === 'talisman' ? 0x4e7a5a : 0xe8b34b)
+      .setDepth(12);
+    fan.setAngle(-24 * this.facing);
+    this.tweens.add({
+      targets: fan,
+      alpha: 0,
+      angle: 24 * this.facing,
+      scaleX: fan.scaleX * 1.15,
+      duration: 160,
+      onComplete: () => fan.destroy(),
+    });
+
+    const dmg = this.getSwitchAttackDamage();
+    let hitCount = 0;
+    for (let i = this.enemies.length - 1; i >= 0; i -= 1) {
+      const enemy = this.enemies[i];
+      if (Phaser.Geom.Intersects.RectangleToRectangle(hitbox, this.bodyBounds(enemy.sprite))) {
+        hitCount += 1;
+        const eBody = enemy.sprite.body as Phaser.Physics.Arcade.Body;
+        const dir = eBody.center.x >= this.player.x ? 1 : -1;
+        this.damageEnemy(enemy, i, dmg, dir, false, 0.16);
+      }
+    }
+
+    if (hitCount > 0) {
+      playSound('hit');
+      this.applyHitstop(SIDE_LIGHT_HITSTOP_MS);
+    }
+    this.updateHud();
+  }
+
+  private performTalismanAttack(): void {
+    this.talismanCooldown = this.getTalismanCooldown();
+    this.talismanVisualTimer = SIDE_TALISMAN_VISUAL_DURATION;
+    playSound('swing');
+
+    const dir = this.facing;
+    const startX = this.player.x + dir * 20;
+    const startY = this.player.y - 2;
+    const sprite = this.add
+      .image(startX, startY, 'talisman_paper')
+      .setFlipX(dir < 0)
+      .setDisplaySize(32, 32)
+      .setDepth(12);
+
+    this.talismanProjectiles.push({
+      sprite,
+      dir,
+      vx: dir * SIDE_TALISMAN_SPEED,
+      rangeLeft: SIDE_TALISMAN_RANGE,
+      damage: this.getTalismanDamage(),
+    });
+  }
+
+  private updateTalismanProjectiles(dt: number): void {
+    for (let i = this.talismanProjectiles.length - 1; i >= 0; i -= 1) {
+      const proj = this.talismanProjectiles[i];
+      const step = proj.vx * dt;
+      proj.sprite.x += step;
+      proj.rangeLeft -= Math.abs(step);
+
+      if (
+        proj.rangeLeft <= 0 ||
+        proj.sprite.x < SIDE_WALL_WIDTH ||
+        proj.sprite.x > ARENA_WIDTH - SIDE_WALL_WIDTH
+      ) {
+        proj.sprite.destroy();
+        this.talismanProjectiles.splice(i, 1);
+        continue;
+      }
+
+      const projBounds = new Phaser.Geom.Rectangle(
+        proj.sprite.x - 10,
+        proj.sprite.y - 8,
+        20,
+        16,
+      );
+      let hit = false;
+      for (let j = this.enemies.length - 1; j >= 0; j -= 1) {
+        const enemy = this.enemies[j];
+        if (Phaser.Geom.Intersects.RectangleToRectangle(projBounds, this.bodyBounds(enemy.sprite))) {
+          hit = true;
+          this.spawnDashSparks(proj.sprite.x, proj.sprite.y);
+          this.damageEnemy(enemy, j, proj.damage, proj.dir, false, 0.14);
+          playSound('hit');
+          this.applyHitstop(SIDE_LIGHT_HITSTOP_MS);
+          break;
+        }
+      }
+
+      if (hit) {
+        proj.sprite.destroy();
+        this.talismanProjectiles.splice(i, 1);
+      }
+    }
+  }
+
   /** Freezes the physics world for `ms`; a new hitstop extends the running one. */
   private applyHitstop(ms: number): void {
     if (this.hitstopEvent) {
@@ -1427,7 +1997,7 @@ export class SideGameScene extends Phaser.Scene {
     this.physics.world.pause();
     this.hitstopEvent = this.time.delayedCall(ms, () => {
       this.hitstopEvent = undefined;
-      if (this.scene.isActive()) {
+      if (this.scene.isActive() && this.activeOverlay === null) {
         this.physics.world.resume();
       }
     });
@@ -1471,7 +2041,14 @@ export class SideGameScene extends Phaser.Scene {
     const body = enemy.sprite.body as Phaser.Physics.Arcade.Body;
     const ex = body.center.x;
     const ey = Math.min(body.center.y, SIDE_GROUND_Y - 18);
-    const dropCount = enemy.coinDrops;
+    const dropCount = enemy.coinDrops + (this.curse === 'treasure_gather' ? 1 : 0);
+    const oilCount =
+      enemy.kind === 'elite'
+        ? ELITE_LAMP_OIL_DROP
+        : enemy.kind === 'boss'
+          ? BOSS_LAMP_OIL_DROP
+          : 0;
+    const coreCount = enemy.kind === 'boss' ? BOSS_DEMON_CORE_DROP : 0;
     this.destroyEnemyUnit(enemy);
     this.enemies.splice(index, 1);
 
@@ -1481,7 +2058,14 @@ export class SideGameScene extends Phaser.Scene {
     this.spawnDeathBurst(ex, ey);
     for (let i = 0; i < dropCount; i += 1) {
       const offsetX = dropCount > 1 ? (i - (dropCount - 1) / 2) * 14 : 0;
-      this.spawnCoinDrop(ex + offsetX, ey);
+      this.spawnCoinDrop(ex + offsetX, ey, 'coin');
+    }
+    for (let i = 0; i < oilCount; i += 1) {
+      const offsetX = (i - (oilCount - 1) / 2) * 18 - 10;
+      this.spawnCoinDrop(ex + offsetX, ey, 'oil');
+    }
+    for (let i = 0; i < coreCount; i += 1) {
+      this.spawnCoinDrop(ex + 16, ey, 'core');
     }
 
     if (this.enemies.length === 0 && !this.roomCleared) {
@@ -1510,13 +2094,23 @@ export class SideGameScene extends Phaser.Scene {
     }
   }
 
-  private spawnCoinDrop(x: number, y: number): void {
+  private spawnCoinDrop(x: number, y: number, kind: PickupKind = 'coin'): void {
     // Render-only scatter: the logical position stays at the drop point
     // (enemy feet) and only the visual arc moves, decaying back to zero.
     const scatter = computeSideCoinScatterVelocity();
-    const coin = this.add.image(x, y + 10, 'coin_dart').setDisplaySize(24, 24).setDepth(7);
+    const texKey = kind === 'coin' ? 'coin_dart' : 'xp_orb';
+    const coin = this.add
+      .image(x, y + 10, texKey)
+      .setDisplaySize(kind === 'coin' ? 24 : 20, kind === 'coin' ? 24 : 20)
+      .setDepth(7);
+    if (kind === 'oil') {
+      coin.setTint(0xe8b34b);
+    } else if (kind === 'core') {
+      coin.setTint(0xb03a2e);
+    }
     this.coinDrops.push({
       sprite: coin,
+      kind,
       logicalX: x,
       logicalY: y + 10,
       scatterVx: scatter.vx,
@@ -1669,18 +2263,31 @@ export class SideGameScene extends Phaser.Scene {
   }
 
   private updateHud(): void {
-    this.hpText.setText(`生命：${this.hp}/${PLAYER_MAX_HP}`);
+    this.hpText.setText(`生命：${this.hp}/${this.maxHp}`);
     this.enemiesText.setText(`心魔：${this.enemies.length}`);
     if (this.chain) {
       this.roomText.setText(`夜巷 ${this.roomIndex + 1}/${this.chain.slots.length}`);
     }
     this.coinsText.setText(`铜钱：${this.coins}`);
+    this.pickupsHudText.setText(`油：${this.lampOil} 核：${this.demonCore}`);
     this.rollHudText.setText(
       this.rollCooldown <= 0 ? '翻身 可用' : `翻身 ${this.rollCooldown.toFixed(1)}s`,
     );
     this.dashHudText.setText(
       this.dashCooldown <= 0 ? '疾攻 可用' : `疾攻 ${this.dashCooldown.toFixed(1)}s`,
     );
+    this.formHudText
+      .setText(`形态：${this.form === 'sword' ? '剑' : '符'} [Q]`)
+      .setTint(this.form === 'sword' ? 0xfbf6e9 : 0x4e7a5a);
+    if (this.curse !== null) {
+      const def = CURSE_DEFS[this.curse];
+      this.curseHudText
+        .setText(def.badge)
+        .setTint(def.borderHex)
+        .setVisible(true);
+    } else {
+      this.curseHudText.setVisible(false);
+    }
     const boss = this.enemies.find((e) => e.kind === 'boss');
     if (boss) {
       const ratio = Math.max(0, Math.min(1, boss.hp / boss.maxHp));
@@ -1734,6 +2341,10 @@ export class SideGameScene extends Phaser.Scene {
     const dt = Math.min(deltaMs / 1000, 0.05);
     this.swingCooldown = Math.max(0, this.swingCooldown - dt);
     this.swingVisualTimer = Math.max(0, this.swingVisualTimer - dt);
+    this.switchCooldown = Math.max(0, this.switchCooldown - dt);
+    this.switchVisualTimer = Math.max(0, this.switchVisualTimer - dt);
+    this.talismanCooldown = Math.max(0, this.talismanCooldown - dt);
+    this.talismanVisualTimer = Math.max(0, this.talismanVisualTimer - dt);
     this.rollCooldown = Math.max(0, this.rollCooldown - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
 
@@ -1885,8 +2496,23 @@ export class SideGameScene extends Phaser.Scene {
       this.speedLineTimer = 0;
     }
 
-    // Hold-J charge tracking (same real-time basis as releaseSwordAttack)
-    if (this.jHeld) {
+    // Hold-J: sword form charges; talisman form auto-fires on cooldown without charging
+    if (this.form === 'talisman') {
+      if (this.jHeld) {
+        this.jHeld = false;
+        this.jHoldStartMs = 0;
+        this.hideChargeBar();
+      }
+      if (
+        this.keyJ.isDown &&
+        this.talismanCooldown <= 0 &&
+        this.rollTimer <= 0 &&
+        this.dashTimer <= 0 &&
+        !this.stageCleared
+      ) {
+        this.performTalismanAttack();
+      }
+    } else if (this.jHeld) {
       if (!this.keyJ.isDown) {
         this.releaseSwordAttack();
       } else {
@@ -1910,9 +2536,11 @@ export class SideGameScene extends Phaser.Scene {
     this.updateSquash(dt);
     this.updateDamageNumbers(dt);
     this.updatePlayerTexture(moveInput !== 0 && body.blocked.down, dt);
+    this.updateTalismanProjectiles(dt);
     this.updateEnemies(dt);
     this.updateEnemyBolts(dt);
     this.updateCoinDrops(dt);
+    this.updateShopPrompt();
     this.updateHud();
   }
 
@@ -1936,7 +2564,7 @@ export class SideGameScene extends Phaser.Scene {
         hitAny = true;
         const eBody = enemy.sprite.body as Phaser.Physics.Arcade.Body;
         this.spawnDashSparks(eBody.center.x, eBody.center.y);
-        this.damageEnemy(enemy, i, SIDE_DASH_DAMAGE, this.dashDir, false, 0.15);
+        this.damageEnemy(enemy, i, this.getDashDamage(), this.dashDir, false, 0.15);
       }
     }
     if (hitAny) {
@@ -1977,6 +2605,22 @@ export class SideGameScene extends Phaser.Scene {
     if (this.dashTimer > 0) {
       // 疾攻 0.18s, 每帧 0.09s。
       this.player.setTexture(this.dashTimer > 0.09 ? 'player_dash_1' : 'player_dash_2');
+      return;
+    }
+    if (this.switchVisualTimer > 0) {
+      // 换形 0.24s, 每帧 0.12s。
+      const elapsed = Math.max(0, SIDE_SWITCH_VISUAL_DURATION - this.switchVisualTimer);
+      this.player.setTexture(
+        elapsed < SIDE_SWITCH_FRAME_SECONDS ? 'player_switch_1' : 'player_switch_2',
+      );
+      return;
+    }
+    if (this.talismanVisualTimer > 0) {
+      // 符纸攻击 0.24s, 每帧 0.12s。
+      const elapsed = Math.max(0, SIDE_TALISMAN_VISUAL_DURATION - this.talismanVisualTimer);
+      this.player.setTexture(
+        elapsed < SIDE_TALISMAN_FRAME_SECONDS ? 'player_talisman_1' : 'player_talisman_2',
+      );
       return;
     }
     if (this.swingVisualTimer > 0) {
@@ -2169,7 +2813,7 @@ export class SideGameScene extends Phaser.Scene {
         if (this.contactSignals.length > 32) {
           this.contactSignals.shift();
         }
-        this.applyPlayerDamage(enemy.contactDamage);
+        this.applyPlayerDamage(this.getEnemyContactDamage(enemy.contactDamage));
         if (this.gameOverTriggered) {
           return;
         }
@@ -2532,7 +3176,13 @@ export class SideGameScene extends Phaser.Scene {
       if (dist <= SIDE_COIN_PICKUP_RADIUS) {
         drop.sprite.destroy();
         this.coinDrops.splice(i, 1);
-        this.coins += 1;
+        if (drop.kind === 'coin') {
+          this.coins += 1;
+        } else if (drop.kind === 'oil') {
+          this.lampOil += 1;
+        } else {
+          this.demonCore += 1;
+        }
       }
     }
   }

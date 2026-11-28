@@ -79,12 +79,18 @@ test.describe('Night Alley S2 Stage', () => {
     expect(state.roomIndex).toBe(4);
     expect(state.roomType).toBe('elite');
 
-    // Room 5 (elite) -> single door -> room 6 (boss).
+    // Room 5 (elite) -> 选霉运后开单门 -> room 6 (boss).
     await clearCurrentRoom(page);
     state = await getState(page);
     expect(state.roomCleared).toBe(true);
     expect(state.stageCleared).toBe(false);
-    expect(state.doors).toHaveLength(1);
+    expect(state.curseMenuOpen).toBe(true);
+    expect(state.doors).toHaveLength(0);
+    await page.keyboard.press('Digit1');
+    await page.waitForFunction(() => {
+      const s = window.__SIDEVIEW_DEBUG__?.getState();
+      return s !== undefined && !s.curseMenuOpen && s.doors.length === 1;
+    });
     await advanceRoom(page, 0);
     state = await getState(page);
     expect(state.roomIndex).toBe(5);
