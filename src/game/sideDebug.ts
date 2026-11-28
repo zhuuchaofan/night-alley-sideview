@@ -113,6 +113,8 @@ export interface SideviewDebugState {
   paused?: boolean;
   swordDamage?: number;
   talismanDamage?: number;
+  /** 触屏覆盖层是否已创建且处于启用状态 (菜单/通关/死亡时为 false)。 */
+  touchOverlayEnabled?: boolean;
   readonly hudFormText?: string;
   readonly hudCurseText?: string;
   readonly hudPickupsText?: string;

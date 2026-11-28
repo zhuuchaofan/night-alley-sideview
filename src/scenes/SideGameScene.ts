@@ -98,6 +98,7 @@ import {
   SIDE_SQUASH_STRETCH_SECONDS,
 } from '../game/sideFeel.ts';
 import { registerSideDebugHook } from '../game/sideDebug.ts';
+import { createTouchOverlay, type TouchOverlay } from '../game/touchOverlay.ts';
 import type { DoorDebugInfo } from '../game/sideDebug.ts';
 import {
   chainSignature,
@@ -299,6 +300,19 @@ export class SideGameScene extends Phaser.Scene {
   private jHeld = false;
   private jHoldStartMs = 0;
 
+  /** 触屏虚拟输入 (S2 (d)): 摇杆模拟值 [-1, 1]、按住攻击标志、边缘触发标志。
+   * 边缘标志由 update() 读后每帧清掉, 不滞留。 */
+  private touchOverlay: TouchOverlay | null = null;
+  private touchOverlayEnabled = false;
+  private touchMoveX = 0;
+  private touchJDown = false;
+  /** 键盘 J 是否按住 (与 touchJDown 分别追踪: 两路输入共用 jHeld,
+   * 松开时须等两路都松开才结算蓄力, 见 releaseAttack)。 */
+  private keyJDown = false;
+  private touchJumpPressed = false;
+  private touchRollPressed = false;
+  private touchDashPressed = false;
+
   private rollTimer = 0;
   private rollCooldown = 0;
   private rollDir: 1 | -1 = 1;
@@ -369,6 +383,7 @@ export class SideGameScene extends Phaser.Scene {
     this.createClearBanner();
     this.createRoomBanner();
     this.bindInputs();
+    this.createTouchOverlay();
 
     // 定种子 → 生成整条链 → 进第 1 间房。data.seed 优先 (Title/GameOver/R 重试传入);
     // 无则消费一次待用调试种子, 再无则随机新种子。
@@ -484,6 +499,7 @@ export class SideGameScene extends Phaser.Scene {
         paused: this.physics.world.isPaused,
         swordDamage: this.getSwordDamage(false),
         talismanDamage: this.getTalismanDamage(),
+        touchOverlayEnabled: this.touchOverlayEnabled,
         hudFormText: this.formHudText.text,
         hudCurseText: this.curseHudText.visible ? this.curseHudText.text : '',
         hudPickupsText: this.pickupsHudText.text,
@@ -654,6 +670,12 @@ export class SideGameScene extends Phaser.Scene {
     this.swingVisualTotal = 0;
     this.jHeld = false;
     this.jHoldStartMs = 0;
+    this.touchMoveX = 0;
+    this.touchJDown = false;
+    this.keyJDown = false;
+    this.touchJumpPressed = false;
+    this.touchRollPressed = false;
+    this.touchDashPressed = false;
     this.rollTimer = 0;
     this.rollCooldown = 0;
     this.rollActiveThisFrame = false;
@@ -878,43 +900,16 @@ export class SideGameScene extends Phaser.Scene {
     this.keyL = kb.addKey(Phaser.Input.Keyboard.KeyCodes.L);
     this.keyE = kb.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
+    // 攻击 (J / 触屏攻击按钮共用): 按下开始蓄力 (符纸形态直接发一发),
+    // 松开按蓄力时长结算轻/重击。nowMs 为事件时间戳 (键盘) 或 performance.now() (触屏)。
     const onKeyDownJ = (event: KeyboardEvent): void => {
-      if (
-        this.activeOverlay !== null ||
-        this.physics.world.isPaused ||
-        this.gameOverTriggered ||
-        this.rollTimer > 0 ||
-        this.dashTimer > 0
-      ) {
-        return;
-      }
-      if (this.form === 'talisman') {
-        if (this.talismanCooldown <= 0) {
-          this.performTalismanAttack();
-        }
-        return;
-      }
-      if (this.jHeld) {
-        return;
-      }
-      this.jHeld = true;
-      // Charge is judged on the DOM event timestamps, not the scene clock:
-      // this.time.now only advances once per frame, so a hold just past the
-      // threshold could otherwise be under-read by up to a frame (more under
-      // hitching). event.timeStamp shares performance.now()'s time origin.
-      this.jHoldStartMs = event.timeStamp;
+      this.keyJDown = true;
+      this.pressAttack(event.timeStamp);
     };
 
     const onKeyUpJ = (event: KeyboardEvent): void => {
-      if (this.form === 'talisman') {
-        this.jHeld = false;
-        return;
-      }
-      if (!this.jHeld || this.gameOverTriggered) {
-        this.jHeld = false;
-        return;
-      }
-      this.releaseSwordAttack(event.timeStamp - this.jHoldStartMs);
+      this.keyJDown = false;
+      this.releaseAttack(event.timeStamp);
     };
 
     const onKeyDownQ = (event: KeyboardEvent): void => {
@@ -1014,6 +1009,128 @@ export class SideGameScene extends Phaser.Scene {
     this.events.on(Phaser.Scenes.Events.POST_UPDATE, this.processPendingTransition, this);
   }
 
+  /** 攻击按下: 键盘 J 与触屏攻击按钮共用。 */
+  private pressAttack(nowMs: number): void {
+    if (
+      this.activeOverlay !== null ||
+      this.physics.world.isPaused ||
+      this.gameOverTriggered ||
+      this.rollTimer > 0 ||
+      this.dashTimer > 0
+    ) {
+      return;
+    }
+    if (this.form === 'talisman') {
+      if (this.talismanCooldown <= 0) {
+        this.performTalismanAttack();
+      }
+      return;
+    }
+    if (this.jHeld) {
+      return;
+    }
+    this.jHeld = true;
+    // Charge is judged on the DOM event timestamps, not the scene clock:
+    // this.time.now only advances once per frame, so a hold just past the
+    // threshold could otherwise be under-read by up to a frame (more under
+    // hitching). event.timeStamp shares performance.now()'s time origin.
+    this.jHoldStartMs = nowMs;
+  }
+
+  /** 攻击松开: 键盘 J 与触屏攻击按钮共用, 按蓄力时长结算轻/重击。 */
+  private releaseAttack(nowMs: number): void {
+    if (this.form === 'talisman') {
+      this.jHeld = false;
+      return;
+    }
+    if (!this.jHeld || this.gameOverTriggered) {
+      this.jHeld = false;
+      return;
+    }
+    // 两路输入共用 jHeld: 任意一路松开时, 另一路仍按住则蓄力继续,
+    // 只有两路都松开才结算 (Codex r1 B1: 原先触屏轻点会提前结束键盘 J 的蓄力, 反之亦然)。
+    if (this.keyJDown || this.touchJDown) {
+      return;
+    }
+    this.releaseSwordAttack(nowMs - this.jHoldStartMs);
+  }
+
+  /** 触屏覆盖层: 只在 coarse pointer 设备上创建; 场景 shutdown 时销毁。 */
+  private createTouchOverlay(): void {
+    const container = document.getElementById('game-container');
+    if (!container) {
+      return;
+    }
+    this.touchOverlay = createTouchOverlay(container, {
+      onMove: (x) => {
+        this.touchMoveX = x;
+      },
+      onJump: () => {
+        this.touchJumpPressed = true;
+      },
+      onAttackDown: () => {
+        this.touchJDown = true;
+        this.pressAttack(performance.now());
+      },
+      onAttackUp: () => {
+        this.touchJDown = false;
+        this.releaseAttack(performance.now());
+      },
+      onAttackCancel: () => {
+        this.touchJDown = false;
+        this.jHeld = false;
+        this.hideChargeBar();
+      },
+      onRoll: () => {
+        this.touchRollPressed = true;
+      },
+      onDash: () => {
+        this.touchDashPressed = true;
+      },
+      onSwitchForm: () => {
+        if (
+          this.activeOverlay === null &&
+          !this.physics.world.isPaused &&
+          !this.gameOverTriggered &&
+          !this.stageCleared
+        ) {
+          this.trySwitchForm();
+        }
+      },
+      onOpenShop: () => {
+        if (
+          this.activeOverlay === null &&
+          !this.physics.world.isPaused &&
+          !this.gameOverTriggered &&
+          !this.stageCleared &&
+          this.isNearShopCounter()
+        ) {
+          this.openShopMenu();
+        }
+      },
+    });
+    this.touchOverlayEnabled = this.touchOverlay !== null;
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.touchOverlay?.destroy();
+      this.touchOverlay = null;
+      this.touchOverlayEnabled = false;
+    });
+  }
+
+  /** 覆盖层显隐: 菜单打开/通关/死亡时隐藏 (否则吃掉菜单卡片与门的 canvas 点击)。
+   * 桌面无覆盖层时标志恒为 false。 */
+  private setTouchOverlayEnabled(enabled: boolean): void {
+    this.touchOverlayEnabled = enabled && this.touchOverlay !== null;
+    if (!enabled) {
+      // 菜单打开/通关/死亡时丢弃未消费的触屏动作边沿, 否则菜单关闭后旧动作仍会触发
+      // (Codex r1 S1: 同帧先点「疾」再点「开店」, 旧疾攻会在菜单关闭后打出)。
+      this.touchJumpPressed = false;
+      this.touchRollPressed = false;
+      this.touchDashPressed = false;
+    }
+    this.touchOverlay?.setEnabled(enabled);
+  }
+
   /**
    * 按脚底锚点生成敌人: sprite.x = footX, sprite.y = surfaceY - 22
    * (经 setEnemyVisualScale 补偿后, 无论缩放多少, 物理盒恒为 28x46、盒底 = sprite.y + 22 = surfaceY)。
@@ -1108,6 +1225,9 @@ export class SideGameScene extends Phaser.Scene {
     // R/Esc 仍解锁且横幅还挂着, 与 roomCleared/stageCleared 分离冲突。
     // 正常换房流程里进房时 stageCleared 恒为 false, 这里是 no-op。
     this.stageCleared = false;
+    if (!this.gameOverTriggered) {
+      this.setTouchOverlayEnabled(true);
+    }
     this.clearGroup.setVisible(false);
     this.roomGeneration += 1;
 
@@ -1353,6 +1473,7 @@ export class SideGameScene extends Phaser.Scene {
     playSound('levelUp');
     if (this.roomIndex === this.chain.slots.length - 1) {
       this.stageCleared = true;
+      this.setTouchOverlayEnabled(false);
       this.clearEnemyBolts();
       this.clearCoinsText.setText(`铜钱总数：${this.coins}`);
       this.clearGroup.setVisible(true);
@@ -1378,14 +1499,17 @@ export class SideGameScene extends Phaser.Scene {
       !this.gameOverTriggered &&
       this.isNearShopCounter();
     this.shopHintText.setVisible(visible);
+    this.touchOverlay?.setShopAvailable(visible);
   }
 
   private pauseForOverlay(kind: 'curse' | 'shop'): void {
     this.activeOverlay = kind;
     this.jHeld = false;
     this.jHoldStartMs = 0;
+    this.touchJDown = false;
     this.hideChargeBar();
     this.physics.world.pause();
+    this.setTouchOverlayEnabled(false);
   }
 
   private closeOverlay(): void {
@@ -1397,6 +1521,9 @@ export class SideGameScene extends Phaser.Scene {
       this.activeOverlay = null;
       if (this.scene.isActive() && !this.hitstopEvent) {
         this.physics.world.resume();
+      }
+      if (!this.gameOverTriggered && !this.stageCleared) {
+        this.setTouchOverlayEnabled(true);
       }
     }
   }
@@ -2311,6 +2438,7 @@ export class SideGameScene extends Phaser.Scene {
       return;
     }
     this.gameOverTriggered = true;
+    this.setTouchOverlayEnabled(false);
     this.scene.start('GameOverScene', {
       kills: this.kills,
       coins: this.coins,
@@ -2352,9 +2480,21 @@ export class SideGameScene extends Phaser.Scene {
       this.playerFlashTimer = Math.max(0, this.playerFlashTimer - dt);
     }
 
-    const moveInput =
+    // 数字方向键与触屏摇杆模拟值合并后钳制到 [-1, 1], 再乘 PLAYER_SPEED。
+    const digitalMove =
       (this.keyD.isDown || this.keyRight.isDown ? 1 : 0) -
       (this.keyA.isDown || this.keyLeft.isDown ? 1 : 0);
+    const moveInput = Phaser.Math.Clamp(digitalMove + this.touchMoveX, -1, 1);
+
+    // 触屏边缘标志 (翻滚/疾攻): 与 JustDown 一并读, 读后每帧清掉 (无论是否触发, 不滞留)。
+    // 注意 JustDown 是破坏性读取 (读一次即清): 跳跃的 JustDown 必须留在原分支里读,
+    // 否则翻滚/疾攻期间按下的跳会被提前消费、动作结束也不会起跳 (Codex r1 B3:
+    // 原版只在普通移动分支读 JustDown, 边沿会保留到动作结束才消费)。
+    const rollQueued =
+      Phaser.Input.Keyboard.JustDown(this.keyShift) || this.touchRollPressed;
+    const dashQueued = Phaser.Input.Keyboard.JustDown(this.keyL) || this.touchDashPressed;
+    this.touchRollPressed = false;
+    this.touchDashPressed = false;
 
     const body = this.player.body as Phaser.Physics.Arcade.Body;
 
@@ -2379,7 +2519,7 @@ export class SideGameScene extends Phaser.Scene {
 
     // Roll (Shift): defensive dodge with i-frames
     if (
-      Phaser.Input.Keyboard.JustDown(this.keyShift) &&
+      rollQueued &&
       this.rollCooldown <= 0 &&
       this.rollTimer <= 0 &&
       this.dashTimer <= 0
@@ -2397,7 +2537,7 @@ export class SideGameScene extends Phaser.Scene {
 
     // Dash Attack (L): offensive lunge piercing enemies
     if (
-      Phaser.Input.Keyboard.JustDown(this.keyL) &&
+      dashQueued &&
       this.dashCooldown <= 0 &&
       this.dashTimer <= 0 &&
       this.rollTimer <= 0
@@ -2450,8 +2590,13 @@ export class SideGameScene extends Phaser.Scene {
       }
       body.setVelocityX(moveInput * PLAYER_SPEED);
 
+      // 跳跃边沿 (键盘 JustDown / 触屏点按) 在此分支读: 翻滚/疾攻期间按下,
+      // 边沿保留到动作结束、回到普通移动且着地时才消费 (与 (c) 前行为一致)。
       const jumpPressed =
-        Phaser.Input.Keyboard.JustDown(this.keyK) || Phaser.Input.Keyboard.JustDown(this.keySpace);
+        Phaser.Input.Keyboard.JustDown(this.keyK) ||
+        Phaser.Input.Keyboard.JustDown(this.keySpace) ||
+        this.touchJumpPressed;
+      this.touchJumpPressed = false;
       if (jumpPressed && body.blocked.down) {
         body.setVelocityY(SIDE_JUMP_VELOCITY);
         this.spawnDust(this.player.x, this.player.y + 20, 3);
@@ -2504,7 +2649,7 @@ export class SideGameScene extends Phaser.Scene {
         this.hideChargeBar();
       }
       if (
-        this.keyJ.isDown &&
+        (this.keyJ.isDown || this.touchJDown) &&
         this.talismanCooldown <= 0 &&
         this.rollTimer <= 0 &&
         this.dashTimer <= 0 &&
@@ -2513,7 +2658,7 @@ export class SideGameScene extends Phaser.Scene {
         this.performTalismanAttack();
       }
     } else if (this.jHeld) {
-      if (!this.keyJ.isDown) {
+      if (!this.keyJ.isDown && !this.touchJDown) {
         this.releaseSwordAttack();
       } else {
         const heldMs = performance.now() - this.jHoldStartMs;
