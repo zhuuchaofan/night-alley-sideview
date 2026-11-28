@@ -142,6 +142,19 @@ describe('rooms: handwritten templates', () => {
     }
   });
 
+  // 150px 是任务书建议的出生间距下限，不保证 2 秒无伤（疾纸人从 150px 外约 1.58 秒可接敌）；
+  // 实际模板的 2 秒安全由 E2E「no HP loss within 2s」验证。
+  it('every enemy spawn is at least 150px away from player entry x=100', () => {
+    for (const t of ROOM_TEMPLATES) {
+      for (const s of t.spawns) {
+        expect(
+          Math.abs(s.footX - 100),
+          `${t.id} spawn (${s.kind} at ${s.footX}) should be >= 150px from x=100`,
+        ).toBeGreaterThanOrEqual(150);
+      }
+    }
+  });
+
   it('every handwritten template has a full jump plan (all platforms reachable)', () => {
     for (const t of ROOM_TEMPLATES) {
       expect(jumpPlan(t)).toHaveLength(t.platforms.length);

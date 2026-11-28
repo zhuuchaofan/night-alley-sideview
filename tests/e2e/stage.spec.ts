@@ -853,16 +853,81 @@ test.describe('Night Alley S2 Stage', () => {
   });
 
   test('HUD room progress follows the room index', async ({ page }) => {
+    test.setTimeout(180000);
+    await startGame(page, SEED);
+
+    // Walk through all 6 rooms via chest route (includes room 3 chest & room 4 shop).
+    for (let i = 0; i < 6; i += 1) {
+      const state = await getState(page);
+      expect(state.roomIndex).toBe(i);
+      expect(state.roomCount).toBe(6);
+      expect(state.hudRoomText).toBe(`夜巷 ${i + 1}/6`);
+
+      if (state.roomType === 'shop') {
+        // Shop auto-clears on entry; verify HUD does not skip 4/6.
+        expect(state.roomCleared).toBe(true);
+        await page.waitForTimeout(300);
+        const afterWait = await getState(page);
+        expect(afterWait.roomIndex).toBe(3);
+        expect(afterWait.hudRoomText).toBe('夜巷 4/6');
+      }
+
+      await clearCurrentRoom(page);
+      const cleared = await getState(page);
+      if (cleared.stageCleared) {
+        expect(i).toBe(5);
+        break;
+      }
+      await advanceRoom(page, i === 1 ? 1 : 0);
+    }
+  });
+
+  test('no HP loss within 2s of entering each room template without input', async ({
+    page,
+  }) => {
     test.setTimeout(120000);
     await startGame(page, SEED);
-    const first = await getState(page);
-    expect(first.roomIndex).toBe(0);
-    expect(first.roomCount).toBe(6);
 
-    await clearCurrentRoom(page);
-    await advanceRoom(page, 0);
-    const second = await getState(page);
-    expect(second.roomIndex).toBe(1);
-    expect(second.roomCount).toBe(6);
+    for (const template of ROOM_TEMPLATES) {
+      // 同一次 evaluate 内读 bodyBottom：进房调用一返回就读，中间无物理帧，
+      // 连一次短下落也藏不住（100ms 后的断言只能排除较长的下落）。
+      // 实测：进房瞬间 bodyBottom 是 494，不是 500——reset 把玩家放在地面上 6px 处，
+      // 第一个物理步再落 6px 到 500（游戏无坠落伤害，这 6px 不掉血）。断言下限 490，
+      // 即出生点离地不超过 10px；若有人把出生点改到高处，这里会立刻失败。
+      const immediateBottom = await page.evaluate((id) => {
+        window.__SIDEVIEW_DEBUG__?.enterTemplate?.(id);
+        window.__SIDEVIEW_DEBUG__?.setHp(30);
+        return window.__SIDEVIEW_DEBUG__?.getState().bodyBottom;
+      }, template.id);
+      expect(
+        immediateBottom,
+        `${template.id}: player should start at most 10px above ground (no fall)`,
+      ).toBeGreaterThanOrEqual(490);
+      expect(
+        immediateBottom,
+        `${template.id}: player should start at or above ground level`,
+      ).toBeLessThanOrEqual(500);
+      await page.waitForTimeout(100);
+      const entry = await getState(page);
+      expect(
+        entry.roomTemplateId,
+        `${template.id}: enterTemplate should have entered this template`,
+      ).toBe(template.id);
+      expect(
+        entry.grounded,
+        `${template.id}: player should be grounded on entry`,
+      ).toBe(true);
+      expect(
+        entry.bodyBottom,
+        `${template.id}: player should start on ground y=500`,
+      ).toBe(500);
+
+      await page.waitForTimeout(2000);
+      const after = await getState(page);
+      expect(
+        after.hp,
+        `${template.id}: player should not lose HP within 2s of entry without input`,
+      ).toBe(30);
+    }
   });
 });

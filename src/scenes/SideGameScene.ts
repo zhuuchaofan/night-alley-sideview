@@ -353,6 +353,7 @@ export class SideGameScene extends Phaser.Scene {
         roomType: this.currentTemplate.type,
         roomCount: this.chain.slots.length,
         roomTemplateId: this.currentTemplate.id,
+        hudRoomText: this.roomText.text,
         stageCleared: this.stageCleared,
         chainSignature: chainSignature(this.chain),
         doors: this.doors.map(

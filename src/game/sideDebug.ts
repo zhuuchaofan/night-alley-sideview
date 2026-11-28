@@ -33,6 +33,7 @@ export interface SideviewDebugState {
   roomType: RoomType | '';
   roomCount: number;
   roomTemplateId: string;
+  readonly hudRoomText?: string; // 只读：调试快照里暴露 HUD 房数文本，供 E2E 断言；无玩法路径消费它。
   stageCleared: boolean;
   /** 链签名: 槽位类型 + 候选模板 id + chosen, 供 E2E 跨局比较。 */
   chainSignature: string;
